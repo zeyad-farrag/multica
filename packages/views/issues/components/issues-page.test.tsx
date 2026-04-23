@@ -74,13 +74,14 @@ vi.mock("@multica/core/api", () => ({
 
 // Mock issue config
 vi.mock("@multica/core/issues/config", () => ({
-  ALL_STATUSES: ["backlog", "todo", "planning", "in_progress", "code_review", "fixing", "testing", "in_review", "checkpoint", "staged", "done", "blocked", "cancelled"],
-  BOARD_STATUSES: ["backlog", "todo", "planning", "in_progress", "code_review", "fixing", "testing", "in_review", "checkpoint", "staged", "done", "blocked"],
-  STATUS_ORDER: ["backlog", "todo", "planning", "in_progress", "code_review", "fixing", "testing", "in_review", "checkpoint", "staged", "done", "blocked", "cancelled"],
+  ALL_STATUSES: ["backlog", "todo", "planning", "ready_for_dev", "in_progress", "code_review", "fixing", "testing", "in_review", "checkpoint", "staged", "done", "blocked", "cancelled"],
+  BOARD_STATUSES: ["backlog", "todo", "planning", "ready_for_dev", "in_progress", "code_review", "fixing", "testing", "in_review", "checkpoint", "staged", "done", "blocked"],
+  STATUS_ORDER: ["backlog", "todo", "planning", "ready_for_dev", "in_progress", "code_review", "fixing", "testing", "in_review", "checkpoint", "staged", "done", "blocked", "cancelled"],
   STATUS_CONFIG: {
     backlog: { label: "Backlog", iconColor: "text-muted-foreground", hoverBg: "hover:bg-accent" },
     todo: { label: "Todo", iconColor: "text-muted-foreground", hoverBg: "hover:bg-accent" },
     planning: { label: "Planning", iconColor: "text-purple-500", hoverBg: "hover:bg-purple-500/10" },
+    ready_for_dev: { label: "Ready for Dev", iconColor: "text-indigo-500", hoverBg: "hover:bg-indigo-500/10" },
     in_progress: { label: "In Progress", iconColor: "text-warning", hoverBg: "hover:bg-warning/10" },
     code_review: { label: "Code Review", iconColor: "text-amber-500", hoverBg: "hover:bg-amber-500/10" },
     fixing: { label: "Fixing", iconColor: "text-orange-500", hoverBg: "hover:bg-orange-500/10" },

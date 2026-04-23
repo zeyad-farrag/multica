@@ -92,6 +92,10 @@ function PlanningIcon() {
   return <ProgressCircle progress={0.15} />;
 }
 
+function ReadyForDevIcon() {
+  return <ProgressCircle progress={0.3} />;
+}
+
 function InProgressIcon() {
   return <ProgressCircle progress={0.5} />;
 }
@@ -171,6 +175,7 @@ const STATUS_RENDERERS: Record<IssueStatus, () => React.ReactNode> = {
   backlog: BacklogIcon,
   todo: TodoIcon,
   planning: PlanningIcon,
+  ready_for_dev: ReadyForDevIcon,
   in_progress: InProgressIcon,
   code_review: CodeReviewIcon,
   fixing: FixingIcon,
