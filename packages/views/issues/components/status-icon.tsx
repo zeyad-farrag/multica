@@ -88,12 +88,36 @@ function TodoIcon() {
   return <ProgressCircle progress={0} />;
 }
 
+function PlanningIcon() {
+  return <ProgressCircle progress={0.15} />;
+}
+
 function InProgressIcon() {
   return <ProgressCircle progress={0.5} />;
 }
 
+function CodeReviewIcon() {
+  return <ProgressCircle progress={0.55} />;
+}
+
+function FixingIcon() {
+  return <ProgressCircle progress={0.4} />;
+}
+
+function TestingIcon() {
+  return <ProgressCircle progress={0.7} />;
+}
+
 function InReviewIcon() {
   return <ProgressCircle progress={0.75} />;
+}
+
+function CheckpointIcon() {
+  return <ProgressCircle progress={0.85} />;
+}
+
+function StagedIcon() {
+  return <ProgressCircle progress={0.95} />;
 }
 
 function DoneIcon() {
@@ -146,8 +170,14 @@ function CancelledIcon() {
 const STATUS_RENDERERS: Record<IssueStatus, () => React.ReactNode> = {
   backlog: BacklogIcon,
   todo: TodoIcon,
+  planning: PlanningIcon,
   in_progress: InProgressIcon,
+  code_review: CodeReviewIcon,
+  fixing: FixingIcon,
+  testing: TestingIcon,
   in_review: InReviewIcon,
+  checkpoint: CheckpointIcon,
+  staged: StagedIcon,
   done: DoneIcon,
   blocked: BlockedIcon,
   cancelled: CancelledIcon,

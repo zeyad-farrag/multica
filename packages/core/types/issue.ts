@@ -1,8 +1,14 @@
 export type IssueStatus =
   | "backlog"
   | "todo"
+  | "planning"
   | "in_progress"
+  | "code_review"
+  | "fixing"
+  | "testing"
   | "in_review"
+  | "checkpoint"
+  | "staged"
   | "done"
   | "blocked"
   | "cancelled";
