@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -443,4 +444,62 @@ func parseUUIDNullable(s string) pgtype.UUID {
 		return pgtype.UUID{}
 	}
 	return parseUUID(s)
+}
+
+// --- Enrich helpers for embedding labels on issues -------------------------
+
+// enrichIssuesWithLabels bulk-fetches labels for every issue in resp and
+// assigns them to resp[i].Labels. Issues with no labels keep the empty slice
+// that the converter initialised. Safe to call with an empty slice.
+func (h *Handler) enrichIssuesWithLabels(ctx context.Context, resp []IssueResponse) {
+	if len(resp) == 0 {
+		return
+	}
+	ids := make([]pgtype.UUID, 0, len(resp))
+	idxByID := make(map[string]int, len(resp))
+	for i, r := range resp {
+		ids = append(ids, parseUUID(r.ID))
+		idxByID[r.ID] = i
+	}
+
+	rows, err := h.Queries.ListLabelsForIssues(ctx, ids)
+	if err != nil {
+		slog.Debug("bulk fetch labels failed", "error", err, "count", len(ids))
+		return
+	}
+
+	for _, row := range rows {
+		idx, ok := idxByID[uuidToString(row.IssueID)]
+		if !ok {
+			continue
+		}
+		resp[idx].Labels = append(resp[idx].Labels, IssueLabelResponse{
+			ID:          uuidToString(row.ID),
+			WorkspaceID: uuidToString(row.WorkspaceID),
+			Name:        row.Name,
+			Color:       row.Color,
+			CreatorType: row.CreatorType,
+			CreatorID:   uuidToPtr(row.CreatorID),
+			CreatedAt:   timestampToString(row.CreatedAt),
+			UpdatedAt:   timestampToString(row.UpdatedAt),
+		})
+	}
+}
+
+// enrichIssueWithLabels is the single-issue variant, for GetIssue / CreateIssue /
+// UpdateIssue response paths.
+func (h *Handler) enrichIssueWithLabels(ctx context.Context, resp *IssueResponse) {
+	if resp == nil || resp.ID == "" {
+		return
+	}
+	rows, err := h.Queries.ListLabelsForIssue(ctx, parseUUID(resp.ID))
+	if err != nil {
+		slog.Debug("fetch labels for single issue failed", "error", err, "issue_id", resp.ID)
+		return
+	}
+	out := make([]IssueLabelResponse, 0, len(rows))
+	for _, l := range rows {
+		out = append(out, issueLabelToResponse(l))
+	}
+	resp.Labels = out
 }
