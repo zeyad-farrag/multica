@@ -133,6 +133,10 @@ function formatActivity(
       return "CodeRabbit requested changes";
     case "review_passed":
       return "CodeRabbit approved the PR";
+    case "label_attached":
+      return `added label "${details.label_name ?? "?"}"`;
+    case "label_detached":
+      return `removed label "${details.label_name ?? "?"}"`;
     default:
       return entry.action ?? "";
   }
@@ -1376,5 +1380,6 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
     </ResizablePanelGroup>
   );
 }
+
 
 
