@@ -520,6 +520,143 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// SPEC: §6.1 #6 — M-PR#3 read portion (Story 1.4 / TIM-9).
+// ListCommentsForBackfill serves GET /api/workspaces/{id}/comments for the
+// standalone autofill agent. Required: author_id (UUID), type (non-empty),
+// date (YYYY-MM-DD). Optional: cursor (<RFC3339Nano>:<UUID>), limit
+// (default 200, max 1000). Auth + workspace-member gating come from the
+// surrounding router groups.
+//
+// NOTE: Returns agent-authored comments too. Per spec §14 + epic 1.4 AC #5,
+// the standalone app filters by author_type='member' on its side. Do NOT
+// add author_type='member' here — see story 1.4 for the resolved divergence
+// from spec §6.1 #6 line 994.
+func (h *Handler) ListCommentsForBackfill(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	wsID := chi.URLParam(r, "id")
+	wsUUID := parseUUID(wsID)
+	if !wsUUID.Valid {
+		writeError(w, http.StatusBadRequest, "invalid workspace id")
+		return
+	}
+
+	authorRaw := r.URL.Query().Get("author_id")
+	if authorRaw == "" {
+		writeError(w, http.StatusBadRequest, "author_id is required")
+		return
+	}
+	authorUUID := parseUUID(authorRaw)
+	if !authorUUID.Valid {
+		writeError(w, http.StatusBadRequest, "invalid author_id")
+		return
+	}
+
+	commentType := r.URL.Query().Get("type")
+	if commentType == "" {
+		writeError(w, http.StatusBadRequest, "type is required")
+		return
+	}
+
+	dateRaw := r.URL.Query().Get("date")
+	if dateRaw == "" {
+		writeError(w, http.StatusBadRequest, "date is required (YYYY-MM-DD)")
+		return
+	}
+	loc := workspaceLocation(ctx, h, wsUUID)
+	dayStart, err := time.ParseInLocation("2006-01-02", dateRaw, loc)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid date; expected YYYY-MM-DD")
+		return
+	}
+	dayEnd := dayStart.Add(24 * time.Hour)
+
+	cursorTS, cursorID, _, err := parseCursor(r.URL.Query().Get("cursor"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_cursor")
+		return
+	}
+
+	limit, err := parseLimit(r, 200, 1000)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_limit")
+		return
+	}
+
+	rows, err := h.Queries.ListCommentsByAuthorTypeDate(ctx, db.ListCommentsByAuthorTypeDateParams{
+		WorkspaceID:     wsUUID,
+		AuthorID:        authorUUID,
+		Type:            commentType,
+		CreatedAt:       pgtype.Timestamptz{Time: dayStart, Valid: true},
+		CreatedAt_2:     pgtype.Timestamptz{Time: dayEnd, Valid: true},
+		Limit:           int32(limit + 1),
+		CursorCreatedAt: cursorTS,
+		CursorID:        cursorID,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list comments")
+		return
+	}
+
+	hasMore := len(rows) > limit
+	if hasMore {
+		rows = rows[:limit]
+	}
+
+	resp := make([]CommentResponse, len(rows))
+	for i, c := range rows {
+		// Backfill consumer needs only (author_id, type, created_at, content);
+		// reactions/attachments enrichment is intentionally skipped.
+		resp[i] = commentToResponse(c, nil, nil)
+	}
+
+	total, countErr := h.Queries.CountCommentsByAuthorTypeDate(ctx, db.CountCommentsByAuthorTypeDateParams{
+		WorkspaceID: wsUUID,
+		AuthorID:    authorUUID,
+		Type:        commentType,
+		CreatedAt:   pgtype.Timestamptz{Time: dayStart, Valid: true},
+		CreatedAt_2: pgtype.Timestamptz{Time: dayEnd, Valid: true},
+	})
+	if countErr != nil {
+		total = int64(len(resp))
+	}
+
+	var nextCursor *string
+	if hasMore && len(rows) > 0 {
+		last := rows[len(rows)-1]
+		c := encodeCursor(last.CreatedAt.Time, uuidToString(last.ID))
+		nextCursor = &c
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"comments":    resp,
+		"next_cursor": nextCursor,
+		"total":       total,
+	})
+}
+
+// workspaceLocation resolves the workspace timezone from its `settings.timezone`
+// field if present (IANA name like "America/New_York"). Falls back to UTC on
+// any error or missing value — the standalone caller is timezone-aware on its
+// side; the endpoint just needs a deterministic [start, end) day window.
+func workspaceLocation(ctx context.Context, h *Handler, wsUUID pgtype.UUID) *time.Location {
+	ws, err := h.Queries.GetWorkspace(ctx, wsUUID)
+	if err != nil || len(ws.Settings) == 0 {
+		return time.UTC
+	}
+	var settings struct {
+		Timezone string `json:"timezone"`
+	}
+	if err := json.Unmarshal(ws.Settings, &settings); err != nil || settings.Timezone == "" {
+		return time.UTC
+	}
+	loc, err := time.LoadLocation(settings.Timezone)
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}
+
 func (h *Handler) DeleteComment(w http.ResponseWriter, r *http.Request) {
 	commentId := chi.URLParam(r, "commentId")
 

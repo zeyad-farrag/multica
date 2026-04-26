@@ -24,3 +24,26 @@ WHERE workspace_id = $1
   AND details->>'to_type' IS NOT NULL
   AND details->>'to_id' IS NOT NULL
 GROUP BY details->>'to_type', details->>'to_id';
+
+-- name: ListActivityByWorkspace :many
+-- SPEC: §6.1 #5 — M-PR#3 read portion (Story 1.4 / TIM-9).
+-- Workspace-scoped activity feed for the team-app gate-bypass detector.
+-- Optional `action` and `actor_id` narrow results without rewriting
+-- queries. Strict-after on (created_at, id) preserves stable pagination.
+SELECT * FROM activity_log
+WHERE workspace_id = $1
+  AND created_at >= $2
+  AND (sqlc.narg('action')::text IS NULL OR action = sqlc.narg('action')::text)
+  AND (sqlc.narg('actor_id')::uuid IS NULL OR actor_id = sqlc.narg('actor_id')::uuid)
+  AND (sqlc.narg('cursor_created_at')::timestamptz IS NULL
+       OR (created_at, id) > (sqlc.narg('cursor_created_at')::timestamptz, sqlc.narg('cursor_id')::uuid))
+ORDER BY created_at ASC, id ASC
+LIMIT $3;
+
+-- name: CountActivityByWorkspace :one
+-- SPEC: §6.1 #5 — M-PR#3 read portion (Story 1.4 / TIM-9).
+SELECT count(*) FROM activity_log
+WHERE workspace_id = $1
+  AND created_at >= $2
+  AND (sqlc.narg('action')::text IS NULL OR action = sqlc.narg('action')::text)
+  AND (sqlc.narg('actor_id')::uuid IS NULL OR actor_id = sqlc.narg('actor_id')::uuid);

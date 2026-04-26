@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -192,4 +193,133 @@ func (h *Handler) GetAssigneeFrequency(w http.ResponseWriter, r *http.Request) {
 	})
 
 	writeJSON(w, http.StatusOK, result)
+}
+
+// SPEC: §6.1 #5 — M-PR#3 read portion (Story 1.4 / TIM-9).
+// WorkspaceActivityEntry mirrors the activity branch of TimelineEntry so
+// the team-app reconciler reads the same shape regardless of source.
+type WorkspaceActivityEntry struct {
+	ID          string          `json:"id"`
+	WorkspaceID string          `json:"workspace_id"`
+	IssueID     *string         `json:"issue_id"`
+	ActorType   *string         `json:"actor_type"`
+	ActorID     string          `json:"actor_id"`
+	Action      string          `json:"action"`
+	Details     json.RawMessage `json:"details,omitempty"`
+	CreatedAt   string          `json:"created_at"`
+}
+
+func activityRowToEntry(a db.ActivityLog) WorkspaceActivityEntry {
+	return WorkspaceActivityEntry{
+		ID:          uuidToString(a.ID),
+		WorkspaceID: uuidToString(a.WorkspaceID),
+		IssueID:     uuidToPtr(a.IssueID),
+		ActorType:   textToPtr(a.ActorType),
+		ActorID:     uuidToString(a.ActorID),
+		Action:      a.Action,
+		Details:     bytesToRawJSON(a.Details),
+		CreatedAt:   timestampToString(a.CreatedAt),
+	}
+}
+
+// SPEC: §6.1 #5 — M-PR#3 read portion (Story 1.4 / TIM-9).
+// ListWorkspaceActivity serves GET /api/workspaces/{id}/activity for the
+// team-app gate-bypass detector. Required: since (RFC3339). Optional:
+// action (free-form snake_case string, no allowlist), actor_id (UUID),
+// cursor (<RFC3339Nano>:<UUID>), limit (default 200, max 1000). Auth +
+// workspace-member gating come from the surrounding router groups.
+func (h *Handler) ListWorkspaceActivity(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	wsID := chi.URLParam(r, "id")
+	wsUUID := parseUUID(wsID)
+	if !wsUUID.Valid {
+		writeError(w, http.StatusBadRequest, "invalid workspace id")
+		return
+	}
+
+	sinceRaw := r.URL.Query().Get("since")
+	if sinceRaw == "" {
+		writeError(w, http.StatusBadRequest, "since is required (RFC3339)")
+		return
+	}
+	t, err := time.Parse(time.RFC3339, sinceRaw)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid since; expected RFC3339")
+		return
+	}
+	since := pgtype.Timestamptz{Time: t, Valid: true}
+
+	var actionFilter pgtype.Text
+	if v := r.URL.Query().Get("action"); v != "" {
+		actionFilter = pgtype.Text{String: v, Valid: true}
+	}
+
+	var actorFilter pgtype.UUID
+	if v := r.URL.Query().Get("actor_id"); v != "" {
+		actorFilter = parseUUID(v)
+		if !actorFilter.Valid {
+			writeError(w, http.StatusBadRequest, "invalid actor_id")
+			return
+		}
+	}
+
+	cursorTS, cursorID, _, err := parseCursor(r.URL.Query().Get("cursor"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_cursor")
+		return
+	}
+
+	limit, err := parseLimit(r, 200, 1000)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_limit")
+		return
+	}
+
+	rows, err := h.Queries.ListActivityByWorkspace(ctx, db.ListActivityByWorkspaceParams{
+		WorkspaceID:     wsUUID,
+		CreatedAt:       since,
+		Limit:           int32(limit + 1),
+		Action:          actionFilter,
+		ActorID:         actorFilter,
+		CursorCreatedAt: cursorTS,
+		CursorID:        cursorID,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list activity")
+		return
+	}
+
+	hasMore := len(rows) > limit
+	if hasMore {
+		rows = rows[:limit]
+	}
+
+	resp := make([]WorkspaceActivityEntry, len(rows))
+	for i, a := range rows {
+		resp[i] = activityRowToEntry(a)
+	}
+
+	total, countErr := h.Queries.CountActivityByWorkspace(ctx, db.CountActivityByWorkspaceParams{
+		WorkspaceID: wsUUID,
+		CreatedAt:   since,
+		Action:      actionFilter,
+		ActorID:     actorFilter,
+	})
+	if countErr != nil {
+		total = int64(len(resp))
+	}
+
+	var nextCursor *string
+	if hasMore && len(rows) > 0 {
+		last := rows[len(rows)-1]
+		c := encodeCursor(last.CreatedAt.Time, uuidToString(last.ID))
+		nextCursor = &c
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"activity":    resp,
+		"next_cursor": nextCursor,
+		"total":       total,
+	})
 }

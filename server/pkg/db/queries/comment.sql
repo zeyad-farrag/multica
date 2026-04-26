@@ -62,3 +62,30 @@ WHERE parent_id = @parent_id AND author_type = 'agent' AND author_id = @agent_id
 
 -- name: DeleteComment :exec
 DELETE FROM comment WHERE id = $1;
+
+-- name: ListCommentsByAuthorTypeDate :many
+-- SPEC: §6.1 #6 — M-PR#3 read portion (Story 1.4 / TIM-9).
+-- Workspace-scoped backfill source for the standalone autofill agent.
+-- The [created_at_start, created_at_end) window is computed by the handler
+-- in the workspace timezone (UTC default). NOTE: deliberately does NOT
+-- filter by author_type — the standalone caller filters per spec §14 and
+-- the epic's AC #5. See ListCommentsForBackfill in comment.go.
+SELECT * FROM comment
+WHERE workspace_id = $1
+  AND author_id = $2
+  AND type = $3
+  AND created_at >= $4
+  AND created_at < $5
+  AND (sqlc.narg('cursor_created_at')::timestamptz IS NULL
+       OR (created_at, id) > (sqlc.narg('cursor_created_at')::timestamptz, sqlc.narg('cursor_id')::uuid))
+ORDER BY created_at ASC, id ASC
+LIMIT $6;
+
+-- name: CountCommentsByAuthorTypeDate :one
+-- SPEC: §6.1 #6 — M-PR#3 read portion (Story 1.4 / TIM-9).
+SELECT count(*) FROM comment
+WHERE workspace_id = $1
+  AND author_id = $2
+  AND type = $3
+  AND created_at >= $4
+  AND created_at < $5;

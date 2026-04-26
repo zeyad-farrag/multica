@@ -196,6 +196,14 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analytics
 					r.Get("/members", h.ListMembersWithUser)
 					r.Post("/leave", h.LeaveWorkspace)
 					r.Get("/invitations", h.ListWorkspaceInvitations)
+
+					// SPEC: §6.1 #3/#5/#6 — M-PR#3 read portion (Story 1.4 / TIM-9).
+					// Workspace-scoped read endpoints for the team-app reconciler
+					// and autofill backfill. Auth + membership inherited from the
+					// surrounding groups (router.go L174 + L194).
+					r.Get("/issues", h.ListIssuesUpdatedSinceForWorkspace)
+					r.Get("/comments", h.ListCommentsForBackfill)
+					r.Get("/activity", h.ListWorkspaceActivity)
 				})
 				// Admin-level access
 				r.Group(func(r chi.Router) {

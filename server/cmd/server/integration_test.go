@@ -743,6 +743,88 @@ func TestInvalidRequestBodies(t *testing.T) {
 	}
 }
 
+// ---- M-PR#3 read-portion endpoints (Story 1.4 / TIM-9) ----
+//
+// Auth chain coverage for the three workspace-scoped read endpoints:
+// /api/workspaces/{id}/issues, /comments, /activity.
+// AC #7 (PAT-less → 401) and AC #8 (non-member → 403) are exercised here
+// once, end-to-end, against the real chi router.
+
+func TestWorkspaceReadEndpointsRequireAuth(t *testing.T) {
+	paths := []string{
+		"/api/workspaces/" + testWorkspaceID + "/issues?updated_since=2026-01-01T00:00:00Z",
+		"/api/workspaces/" + testWorkspaceID + "/comments?author_id=" + testUserID + "&type=comment&date=2026-01-01",
+		"/api/workspaces/" + testWorkspaceID + "/activity?since=2026-01-01T00:00:00Z",
+	}
+	for _, p := range paths {
+		resp, err := http.Get(testServer.URL + p)
+		if err != nil {
+			t.Fatalf("request to %s failed: %v", p, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 401 {
+			t.Fatalf("%s: expected 401, got %d", p, resp.StatusCode)
+		}
+	}
+}
+
+func TestWorkspaceReadEndpointsMemberCanRead(t *testing.T) {
+	cases := []string{
+		"/api/workspaces/" + testWorkspaceID + "/issues?updated_since=2020-01-01T00:00:00Z",
+		"/api/workspaces/" + testWorkspaceID + "/comments?author_id=" + testUserID + "&type=comment&date=2030-01-01",
+		"/api/workspaces/" + testWorkspaceID + "/activity?since=2020-01-01T00:00:00Z",
+	}
+	for _, p := range cases {
+		resp := authRequest(t, "GET", p, nil)
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d body=%s", p, resp.StatusCode, body)
+		}
+	}
+}
+
+func TestWorkspaceReadEndpointsRejectNonMember(t *testing.T) {
+	const nonMemberEmail = "non-member-read@multica.ai"
+	ctx := context.Background()
+	t.Cleanup(func() {
+		testPool.Exec(ctx, `DELETE FROM "user" WHERE email = $1`, nonMemberEmail)
+	})
+
+	var nonMemberID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO "user" (name, email) VALUES ($1, $2) RETURNING id
+	`, "Non Member", nonMemberEmail).Scan(&nonMemberID); err != nil {
+		t.Fatalf("seed non-member: %v", err)
+	}
+
+	nonMemberToken, err := generateTestJWT(nonMemberID, nonMemberEmail, "Non Member")
+	if err != nil {
+		t.Fatalf("mint token: %v", err)
+	}
+
+	paths := []string{
+		"/api/workspaces/" + testWorkspaceID + "/issues?updated_since=2026-01-01T00:00:00Z",
+		"/api/workspaces/" + testWorkspaceID + "/comments?author_id=" + nonMemberID + "&type=comment&date=2026-01-01",
+		"/api/workspaces/" + testWorkspaceID + "/activity?since=2026-01-01T00:00:00Z",
+	}
+	for _, p := range paths {
+		req, err := http.NewRequest("GET", testServer.URL+p, nil)
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+nonMemberToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("non-member request to %s: %v", p, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s: expected 403 for non-member, got %d", p, resp.StatusCode)
+		}
+	}
+}
+
 // ---- WebSocket integration through full router ----
 
 func TestWebSocketIntegration(t *testing.T) {

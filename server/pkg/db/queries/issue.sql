@@ -135,3 +135,26 @@ UPDATE issue
 SET first_executed_at = now()
 WHERE id = $1 AND first_executed_at IS NULL
 RETURNING id, workspace_id, creator_type, creator_id, first_executed_at;
+
+-- name: ListIssuesUpdatedSince :many
+-- SPEC: §6.1 #3 — M-PR#3 read portion (Story 1.4 / TIM-9).
+-- Cursor sync for the team-app reconciler. Strict-after on the
+-- (updated_at, id) tuple guarantees no duplicates across pages even
+-- when timestamps tie on the millisecond. Mirrors the column shape of
+-- ListIssues so callers can reuse issueListRowToResponse.
+SELECT id, workspace_id, title, description, status, priority,
+       assignee_type, assignee_id, creator_type, creator_id,
+       parent_issue_id, position, due_date, created_at, updated_at, number, project_id
+FROM issue
+WHERE workspace_id = $1
+  AND updated_at >= $2
+  AND (sqlc.narg('cursor_updated_at')::timestamptz IS NULL
+       OR (updated_at, id) > (sqlc.narg('cursor_updated_at')::timestamptz, sqlc.narg('cursor_id')::uuid))
+ORDER BY updated_at ASC, id ASC
+LIMIT $3;
+
+-- name: CountIssuesUpdatedSince :one
+-- SPEC: §6.1 #3 — M-PR#3 read portion (Story 1.4 / TIM-9).
+SELECT count(*) FROM issue
+WHERE workspace_id = $1
+  AND updated_at >= $2;

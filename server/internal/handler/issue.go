@@ -1532,3 +1532,116 @@ func bytesToRawJSON(b []byte) json.RawMessage {
 	}
 	return json.RawMessage(b)
 }
+
+// SPEC: §6.1 #3 — M-PR#3 read portion (Story 1.4 / TIM-9).
+// issueUpdatedSinceRowToResponse mirrors issueListRowToResponse for the
+// parallel sqlc row type produced by ListIssuesUpdatedSince. Same column
+// shape, distinct Go type per sqlc convention.
+func issueUpdatedSinceRowToResponse(i db.ListIssuesUpdatedSinceRow, issuePrefix string) IssueResponse {
+	identifier := issuePrefix + "-" + strconv.Itoa(int(i.Number))
+	return IssueResponse{
+		ID:            uuidToString(i.ID),
+		WorkspaceID:   uuidToString(i.WorkspaceID),
+		Number:        i.Number,
+		Identifier:    identifier,
+		Title:         i.Title,
+		Description:   textToPtr(i.Description),
+		Status:        i.Status,
+		Priority:      i.Priority,
+		AssigneeType:  textToPtr(i.AssigneeType),
+		AssigneeID:    uuidToPtr(i.AssigneeID),
+		CreatorType:   i.CreatorType,
+		CreatorID:     uuidToString(i.CreatorID),
+		ParentIssueID: uuidToPtr(i.ParentIssueID),
+		ProjectID:     uuidToPtr(i.ProjectID),
+		Position:      i.Position,
+		DueDate:       timestampToPtr(i.DueDate),
+		CreatedAt:     timestampToString(i.CreatedAt),
+		UpdatedAt:     timestampToString(i.UpdatedAt),
+	}
+}
+
+// SPEC: §6.1 #3 — M-PR#3 read portion (Story 1.4 / TIM-9).
+// ListIssuesUpdatedSinceForWorkspace serves GET /api/workspaces/{id}/issues
+// for the team-app reconciler. Required: updated_since (RFC3339). Optional:
+// cursor (<RFC3339Nano>:<UUID>), limit (default 200, max 1000). Auth +
+// workspace-member gating come from the surrounding router groups.
+func (h *Handler) ListIssuesUpdatedSinceForWorkspace(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	wsID := chi.URLParam(r, "id")
+	wsUUID := parseUUID(wsID)
+	if !wsUUID.Valid {
+		writeError(w, http.StatusBadRequest, "invalid workspace id")
+		return
+	}
+
+	updatedSinceRaw := r.URL.Query().Get("updated_since")
+	if updatedSinceRaw == "" {
+		writeError(w, http.StatusBadRequest, "updated_since is required (RFC3339)")
+		return
+	}
+	t, err := time.Parse(time.RFC3339, updatedSinceRaw)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid updated_since; expected RFC3339")
+		return
+	}
+	updatedSince := pgtype.Timestamptz{Time: t, Valid: true}
+
+	cursorTS, cursorID, _, err := parseCursor(r.URL.Query().Get("cursor"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_cursor")
+		return
+	}
+
+	limit, err := parseLimit(r, 200, 1000)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_limit")
+		return
+	}
+
+	// Fetch limit+1 to detect "more available" without an extra round-trip.
+	rows, err := h.Queries.ListIssuesUpdatedSince(ctx, db.ListIssuesUpdatedSinceParams{
+		WorkspaceID:     wsUUID,
+		UpdatedAt:       updatedSince,
+		Limit:           int32(limit + 1),
+		CursorUpdatedAt: cursorTS,
+		CursorID:        cursorID,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list issues")
+		return
+	}
+
+	hasMore := len(rows) > limit
+	if hasMore {
+		rows = rows[:limit]
+	}
+
+	prefix := h.getIssuePrefix(ctx, wsUUID)
+	resp := make([]IssueResponse, len(rows))
+	for i, row := range rows {
+		resp[i] = issueUpdatedSinceRowToResponse(row, prefix)
+	}
+
+	total, countErr := h.Queries.CountIssuesUpdatedSince(ctx, db.CountIssuesUpdatedSinceParams{
+		WorkspaceID: wsUUID,
+		UpdatedAt:   updatedSince,
+	})
+	if countErr != nil {
+		total = int64(len(resp))
+	}
+
+	var nextCursor *string
+	if hasMore && len(rows) > 0 {
+		last := rows[len(rows)-1]
+		c := encodeCursor(last.UpdatedAt.Time, uuidToString(last.ID))
+		nextCursor = &c
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"issues":      resp,
+		"next_cursor": nextCursor,
+		"total":       total,
+	})
+}
