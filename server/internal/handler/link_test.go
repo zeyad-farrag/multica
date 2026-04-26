@@ -347,3 +347,167 @@ func TestListBlockers_OnlyOpen(t *testing.T) {
 		t.Fatalf("blocker id: want %s; got %v", blockerOpen, got)
 	}
 }
+
+// Verifies that creating and deleting a link writes activity_log rows on
+// BOTH the source and target issues with the correct action + JSON details.
+// The frontend's formatActivity branches off these rows.
+func TestActivityRowsInsertedOnLinkCreateAndDelete(t *testing.T) {
+	wsID, userID := seedLinkWorkspace(t, "ACT")
+	a := seedLinkIssue(t, wsID, userID, 1, "Source", "todo")
+	b := seedLinkIssue(t, wsID, userID, 2, "Target", "todo")
+
+	// --- CREATE ------------------------------------------------------------
+	w := httptest.NewRecorder()
+	req := linkReq("POST",
+		fmt.Sprintf("/api/issues/%s/links", a),
+		userID, wsID,
+		map[string]string{"target_issue_id": b, "link_type": "blocks"},
+		"id", a,
+	)
+	testHandler.CreateIssueLink(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create link: %d %s", w.Code, w.Body.String())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("unmarshal created: %v", err)
+	}
+	linkID := created["id"].(string)
+
+	// Inspect activity rows for both issues.
+	type actRow struct {
+		issueID  string
+		action   string
+		details  []byte
+	}
+	rows := func(action string) []actRow {
+		t.Helper()
+		r, err := testPool.Query(context.Background(),
+			`SELECT issue_id::text, action, details
+			   FROM activity_log
+			  WHERE issue_id IN ($1,$2) AND action = $3
+			  ORDER BY created_at`,
+			a, b, action)
+		if err != nil {
+			t.Fatalf("query activity (%s): %v", action, err)
+		}
+		defer r.Close()
+		var out []actRow
+		for r.Next() {
+			var row actRow
+			if err := r.Scan(&row.issueID, &row.action, &row.details); err != nil {
+				t.Fatalf("scan activity: %v", err)
+			}
+			out = append(out, row)
+		}
+		return out
+	}
+
+	added := rows("link_added")
+	if len(added) != 2 {
+		t.Fatalf("link_added: want 2 rows (source+target); got %d", len(added))
+	}
+
+	// Index rows by issue id for direction-aware assertions.
+	bySrc, byTgt := map[string][]byte{}, map[string][]byte{}
+	for _, row := range added {
+		switch row.issueID {
+		case a:
+			bySrc["link_added"] = row.details
+		case b:
+			byTgt["link_added"] = row.details
+		default:
+			t.Fatalf("unexpected issue_id %s in activity row", row.issueID)
+		}
+	}
+	if bySrc["link_added"] == nil || byTgt["link_added"] == nil {
+		t.Fatalf("missing source or target activity row: src=%v tgt=%v",
+			bySrc["link_added"], byTgt["link_added"])
+	}
+
+	srcDetails := map[string]any{}
+	tgtDetails := map[string]any{}
+	if err := json.Unmarshal(bySrc["link_added"], &srcDetails); err != nil {
+		t.Fatalf("unmarshal src details: %v", err)
+	}
+	if err := json.Unmarshal(byTgt["link_added"], &tgtDetails); err != nil {
+		t.Fatalf("unmarshal tgt details: %v", err)
+	}
+
+	// Source row: outgoing, link_type=blocks, points at target.
+	if got := srcDetails["link_type"]; got != "blocks" {
+		t.Fatalf("src link_type: want blocks; got %v", got)
+	}
+	if got := srcDetails["direction"]; got != "outgoing" {
+		t.Fatalf("src direction: want outgoing; got %v", got)
+	}
+	if got := srcDetails["target_issue_id"]; got != b {
+		t.Fatalf("src target_issue_id: want %s; got %v", b, got)
+	}
+	if _, ok := srcDetails["target_identifier"].(string); !ok {
+		t.Fatalf("src target_identifier missing or not a string: %v", srcDetails["target_identifier"])
+	}
+
+	// Target row: incoming, points back at source.
+	if got := tgtDetails["link_type"]; got != "blocks" {
+		t.Fatalf("tgt link_type: want blocks; got %v", got)
+	}
+	if got := tgtDetails["direction"]; got != "incoming" {
+		t.Fatalf("tgt direction: want incoming; got %v", got)
+	}
+	if got := tgtDetails["target_issue_id"]; got != a {
+		t.Fatalf("tgt target_issue_id: want %s; got %v", a, got)
+	}
+
+	// --- DELETE ------------------------------------------------------------
+	wd := httptest.NewRecorder()
+	rd := linkReq("DELETE",
+		fmt.Sprintf("/api/issues/%s/links/%s", a, linkID),
+		userID, wsID, nil, "id", a, "linkId", linkID)
+	testHandler.DeleteIssueLink(wd, rd)
+	if wd.Code != http.StatusNoContent {
+		t.Fatalf("delete link: %d %s", wd.Code, wd.Body.String())
+	}
+
+	removed := rows("link_removed")
+	if len(removed) != 2 {
+		t.Fatalf("link_removed: want 2 rows (source+target); got %d", len(removed))
+	}
+	sawSrc, sawTgt := false, false
+	for _, row := range removed {
+		var d map[string]any
+		if err := json.Unmarshal(row.details, &d); err != nil {
+			t.Fatalf("unmarshal removed details: %v", err)
+		}
+		if d["link_type"] != "blocks" {
+			t.Fatalf("removed link_type: want blocks; got %v", d["link_type"])
+		}
+		switch row.issueID {
+		case a:
+			sawSrc = true
+			if d["direction"] != "outgoing" {
+				t.Fatalf("src removed direction: want outgoing; got %v", d["direction"])
+			}
+			if d["target_issue_id"] != b {
+				t.Fatalf("src removed target: want %s; got %v", b, d["target_issue_id"])
+			}
+			if _, ok := d["target_identifier"].(string); !ok || d["target_identifier"] == "" {
+				t.Fatalf("src removed missing target_identifier: %v", d["target_identifier"])
+			}
+		case b:
+			sawTgt = true
+			if d["direction"] != "incoming" {
+				t.Fatalf("tgt removed direction: want incoming; got %v", d["direction"])
+			}
+			if d["target_issue_id"] != a {
+				t.Fatalf("tgt removed target: want %s; got %v", a, d["target_issue_id"])
+			}
+			if _, ok := d["target_identifier"].(string); !ok || d["target_identifier"] == "" {
+				t.Fatalf("tgt removed missing target_identifier: %v", d["target_identifier"])
+			}
+		}
+	}
+	if !sawSrc || !sawTgt {
+		t.Fatalf("missing removed row: src=%v tgt=%v", sawSrc, sawTgt)
+	}
+}

@@ -320,17 +320,28 @@ func (h *Handler) DeleteIssueLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Activity on both sides.
+	// Activity on both sides. We resolve identifiers ("TIM-7") so the
+	// frontend can render meaningful copy without a follow-up lookup —
+	// matching the create-side payload shape.
+	var srcIdent, tgtIdent string
+	if srcIssue, err := h.Queries.GetIssue(r.Context(), link.SourceIssueID); err == nil {
+		srcIdent = h.identifierFor(r.Context(), srcIssue)
+	}
+	if tgtIssue, err := h.Queries.GetIssue(r.Context(), link.TargetIssueID); err == nil {
+		tgtIdent = h.identifierFor(r.Context(), tgtIssue)
+	}
 	srcDetails := map[string]any{
-		"target_issue_id": uuidToString(link.TargetIssueID),
-		"link_type":       link.LinkType,
-		"direction":       link.Direction,
+		"target_issue_id":   uuidToString(link.TargetIssueID),
+		"target_identifier": tgtIdent,
+		"link_type":         link.LinkType,
+		"direction":         link.Direction,
 	}
 	h.insertLabelActivity(r, link.SourceWorkspaceID, link.SourceIssueID, "link_removed", actorType, actorID, srcDetails)
 	tgtDetails := map[string]any{
-		"target_issue_id": uuidToString(link.SourceIssueID),
-		"link_type":       link.LinkType,
-		"direction":       reverseDirection(link.Direction),
+		"target_issue_id":   uuidToString(link.SourceIssueID),
+		"target_identifier": srcIdent,
+		"link_type":         link.LinkType,
+		"direction":         reverseDirection(link.Direction),
 	}
 	h.insertLabelActivity(r, link.TargetWorkspaceID, link.TargetIssueID, "link_removed", actorType, actorID, tgtDetails)
 

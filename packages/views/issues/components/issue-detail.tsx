@@ -21,7 +21,8 @@ import { PageHeader } from "../../layout/page-header";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import { LinkRow } from "./link-row";
 import { BlockedWarning } from "./blocked-warning";
-import { OPEN_STATUSES } from "@multica/core/types";
+import { OPEN_STATUSES, LINK_LABEL } from "@multica/core/types";
+import type { LinkType } from "@multica/core/types";
 import type { IssueBlocker } from "@multica/core/types";
 import { Button } from "@multica/ui/components/ui/button";
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@multica/ui/components/ui/resizable";
@@ -84,6 +85,21 @@ function priorityLabel(priority: string): string {
   return PRIORITY_CONFIG[priority as IssuePriority]?.label ?? priority;
 }
 
+/** Pick the direction-aware verb for a link activity entry. The activity
+ *  details record stores the canonical (link_type, direction) pair from
+ *  the perspective of the issue the entry was logged on, so an outgoing
+ *  blocks on issue A reads "blocks", while the mirror on issue B reads
+ *  "blocked by". Falls back to the raw link_type if either field is
+ *  missing or unknown. */
+function linkVerb(linkType: string | undefined, direction: string | undefined): string {
+  const t = linkType as LinkType | undefined;
+  const d = (direction === "incoming" ? "incoming" : "outgoing") as "outgoing" | "incoming";
+  if (t && LINK_LABEL[t]) {
+    return LINK_LABEL[t][d];
+  }
+  return linkType ?? "linked to";
+}
+
 function formatActivity(
   entry: TimelineEntry,
   resolveActorName?: (type: string, id: string) => string,
@@ -141,6 +157,16 @@ function formatActivity(
       return `added label "${details.label_name ?? "?"}"`;
     case "label_detached":
       return `removed label "${details.label_name ?? "?"}"`;
+    case "link_added": {
+      const verb = linkVerb(details.link_type, details.direction);
+      const tgt = details.target_identifier ?? "?";
+      return `${verb} ${tgt}`;
+    }
+    case "link_removed": {
+      const verb = linkVerb(details.link_type, details.direction);
+      const tgt = details.target_identifier ?? "?";
+      return `removed link: ${verb} ${tgt}`;
+    }
     default:
       return entry.action ?? "";
   }
