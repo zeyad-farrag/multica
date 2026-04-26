@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/events"
+	ghintegration "github.com/multica-ai/multica/server/internal/integrations/github"
 	"github.com/multica-ai/multica/server/internal/handler"
 	"github.com/multica-ai/multica/server/internal/middleware"
 	"github.com/multica-ai/multica/server/internal/realtime"
@@ -136,6 +138,19 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analytics
 
 	// Public API
 	r.Get("/api/config", h.GetConfig)
+
+	// GitHub webhook (HMAC-authenticated, no user session required).
+	// Skips registration silently if GITHUB_APP_* env vars are unset — useful
+	// for local dev / fresh installs.
+	if os.Getenv("GITHUB_APP_ID") != "" && os.Getenv("GITHUB_APP_PRIVATE_KEY_PATH") != "" && os.Getenv("GITHUB_APP_WEBHOOK_SECRET") != "" {
+		if gh, err := ghintegration.NewWebhookHandlerFromEnv(queries, bus); err != nil {
+			// Fail open: log but don't crash the server. The webhook just
+			// won't be available until the operator fixes the config.
+			slog.Warn("github webhook handler init failed", "error", err)
+		} else {
+			r.Post("/api/webhooks/github", gh.ServeHTTP)
+		}
+	}
 
 	// Daemon API routes (require daemon token or valid user token)
 	r.Route("/api/daemon", func(r chi.Router) {
