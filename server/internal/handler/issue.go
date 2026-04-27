@@ -1623,3 +1623,104 @@ func bytesToRawJSON(b []byte) json.RawMessage {
 	return json.RawMessage(b)
 }
 
+// SPEC: §6.1 #3, §22 M-PR#3 — Story 1.4 read portion. Cursor-paged read
+// endpoint for the team-app reconciler. Cursor format <RFC3339Nano>:<UUID>;
+// the handler fetches limit+1 rows and only sets next_cursor when more
+// results exist. Existing /api/issues handler (ListIssues above) is left
+// untouched — AC-2 demands byte-for-byte identical behavior on the legacy
+// header-driven endpoint.
+func (h *Handler) ListIssuesUpdatedSinceForWorkspace(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	workspaceID := chi.URLParam(r, "id")
+	if workspaceID == "" {
+		writeError(w, http.StatusBadRequest, "workspace id is required")
+		return
+	}
+	wsUUID := parseUUID(workspaceID)
+	if !wsUUID.Valid {
+		writeError(w, http.StatusBadRequest, "invalid workspace id")
+		return
+	}
+
+	q := r.URL.Query()
+	rawSince := q.Get("updated_since")
+	if rawSince == "" {
+		writeError(w, http.StatusBadRequest, "updated_since is required")
+		return
+	}
+	since, err := time.Parse(time.RFC3339, rawSince)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid updated_since; expected RFC3339")
+		return
+	}
+
+	cursorTS, cursorID, err := parseCursor(q.Get("cursor"))
+	if err != nil {
+		writeInvalidCursor(w)
+		return
+	}
+
+	limit, err := parseLimit(q.Get("limit"), 200, 1000)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid limit; must be 1-1000")
+		return
+	}
+
+	cursorTSCol := pgtype.Timestamptz{}
+	if !cursorTS.IsZero() {
+		cursorTSCol = pgtype.Timestamptz{Time: cursorTS, Valid: true}
+	}
+
+	// Fetch limit+1 to determine whether more pages exist without a second
+	// query.
+	rows, err := h.Queries.ListIssuesUpdatedSince(ctx, db.ListIssuesUpdatedSinceParams{
+		WorkspaceID:     wsUUID,
+		UpdatedAt:       pgtype.Timestamptz{Time: since, Valid: true},
+		Limit:           int32(limit + 1),
+		CursorUpdatedAt: cursorTSCol,
+		CursorID:        cursorID,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list issues")
+		return
+	}
+
+	hasMore := len(rows) > limit
+	if hasMore {
+		rows = rows[:limit]
+	}
+
+	prefix := h.getIssuePrefix(ctx, wsUUID)
+	resp := make([]IssueResponse, len(rows))
+	for i, row := range rows {
+		// The columns selected by ListIssuesUpdatedSince exactly match the
+		// existing ListIssues query, so a struct conversion lets us reuse
+		// issueListRowToResponse without a parallel mapper.
+		resp[i] = issueListRowToResponse(db.ListIssuesRow(row), prefix)
+	}
+	h.enrichIssuesWithLabels(ctx, resp)
+	h.enrichIssuesWithLinks(ctx, resp)
+
+	var nextCursor *string
+	if hasMore && len(rows) > 0 {
+		last := rows[len(rows)-1]
+		c := encodeCursor(last.UpdatedAt.Time, last.ID)
+		nextCursor = &c
+	}
+
+	total, err := h.Queries.CountIssuesUpdatedSince(ctx, db.CountIssuesUpdatedSinceParams{
+		WorkspaceID: wsUUID,
+		UpdatedAt:   pgtype.Timestamptz{Time: since, Valid: true},
+	})
+	if err != nil {
+		total = int64(len(resp))
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"issues":      resp,
+		"next_cursor": nextCursor,
+		"total":       total,
+	})
+}
+

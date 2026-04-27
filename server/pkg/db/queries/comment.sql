@@ -62,3 +62,34 @@ WHERE parent_id = @parent_id AND author_type = 'agent' AND author_id = @agent_id
 
 -- name: DeleteComment :exec
 DELETE FROM comment WHERE id = $1;
+
+-- SPEC: §6.1 #6, §22 M-PR#3 — Story 1.4 read portion. Backfill query for the
+-- standalone autofill. Filter is (workspace, author_id, type, [start,end))
+-- with tuple cursor on (created_at, id). Note: NO author_type='member'
+-- filter — agent-authored comments must be returned (epic 1.4 AC + spec §14
+-- override the §6.1 #6 line that says otherwise; the standalone caller
+-- filters on its side).
+
+-- name: ListCommentsByAuthorTypeDate :many
+SELECT id, issue_id, author_type, author_id, content, type,
+       created_at, updated_at, parent_id, workspace_id
+FROM comment
+WHERE workspace_id = $1
+  AND author_id = $2
+  AND type = $3
+  AND created_at >= $4
+  AND created_at < $5
+  AND (
+        sqlc.narg('cursor_created_at')::timestamptz IS NULL
+     OR (created_at, id) > (sqlc.narg('cursor_created_at')::timestamptz, sqlc.narg('cursor_id')::uuid)
+  )
+ORDER BY created_at ASC, id ASC
+LIMIT $6;
+
+-- name: CountCommentsByAuthorTypeDate :one
+SELECT count(*) FROM comment
+WHERE workspace_id = $1
+  AND author_id = $2
+  AND type = $3
+  AND created_at >= $4
+  AND created_at < $5;

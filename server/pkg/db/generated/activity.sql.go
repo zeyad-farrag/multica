@@ -11,6 +11,33 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countActivityByWorkspace = `-- name: CountActivityByWorkspace :one
+SELECT count(*) FROM activity_log
+WHERE workspace_id = $1
+  AND created_at >= $2
+  AND ($3::text IS NULL OR action = $3)
+  AND ($4::uuid IS NULL OR actor_id = $4)
+`
+
+type CountActivityByWorkspaceParams struct {
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	Action      pgtype.Text        `json:"action"`
+	ActorID     pgtype.UUID        `json:"actor_id"`
+}
+
+func (q *Queries) CountActivityByWorkspace(ctx context.Context, arg CountActivityByWorkspaceParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countActivityByWorkspace,
+		arg.WorkspaceID,
+		arg.CreatedAt,
+		arg.Action,
+		arg.ActorID,
+	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countAssigneeChangesByActor = `-- name: CountAssigneeChangesByActor :many
 SELECT
   details->>'to_type' as assignee_type,
@@ -112,6 +139,72 @@ type ListActivitiesParams struct {
 
 func (q *Queries) ListActivities(ctx context.Context, arg ListActivitiesParams) ([]ActivityLog, error) {
 	rows, err := q.db.Query(ctx, listActivities, arg.IssueID, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ActivityLog{}
+	for rows.Next() {
+		var i ActivityLog
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.IssueID,
+			&i.ActorType,
+			&i.ActorID,
+			&i.Action,
+			&i.Details,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listActivityByWorkspace = `-- name: ListActivityByWorkspace :many
+
+SELECT id, workspace_id, issue_id, actor_type, actor_id, action, details, created_at
+FROM activity_log
+WHERE workspace_id = $1
+  AND created_at >= $2
+  AND ($4::text IS NULL OR action = $4)
+  AND ($5::uuid IS NULL OR actor_id = $5)
+  AND (
+        $6::timestamptz IS NULL
+     OR (created_at, id) > ($6::timestamptz, $7::uuid)
+  )
+ORDER BY created_at ASC, id ASC
+LIMIT $3
+`
+
+type ListActivityByWorkspaceParams struct {
+	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	Limit           int32              `json:"limit"`
+	Action          pgtype.Text        `json:"action"`
+	ActorID         pgtype.UUID        `json:"actor_id"`
+	CursorCreatedAt pgtype.Timestamptz `json:"cursor_created_at"`
+	CursorID        pgtype.UUID        `json:"cursor_id"`
+}
+
+// SPEC: §6.1 #5, §19.17, §22 M-PR#3 — Story 1.4 read portion. Workspace-
+// scoped scan for the team-app reconciler's gate-bypass detection.
+// Optional action/actor_id filters; tuple cursor on (created_at, id).
+func (q *Queries) ListActivityByWorkspace(ctx context.Context, arg ListActivityByWorkspaceParams) ([]ActivityLog, error) {
+	rows, err := q.db.Query(ctx, listActivityByWorkspace,
+		arg.WorkspaceID,
+		arg.CreatedAt,
+		arg.Limit,
+		arg.Action,
+		arg.ActorID,
+		arg.CursorCreatedAt,
+		arg.CursorID,
+	)
 	if err != nil {
 		return nil, err
 	}
