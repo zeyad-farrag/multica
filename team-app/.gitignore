@@ -1,0 +1,8 @@
+.env
+*.log
+
+frontend/.next/
+frontend/node_modules/
+frontend/out/
+
+team-app-server

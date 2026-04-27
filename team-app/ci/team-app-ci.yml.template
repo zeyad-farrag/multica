@@ -1,0 +1,101 @@
+# =============================================================================
+# Story 1.1 Task 7 — team-app CI workflow.
+#
+# This file is a TEMPLATE. The architect's and dev's OAuth tokens both lack
+# GitHub `workflow` scope, so neither can push a file under
+# `.github/workflows/`. After this PR merges, a human with workflow scope must
+# copy this file verbatim to `.github/workflows/team-app-ci.yml`:
+#
+#     cp team-app/ci/team-app-ci.yml.template .github/workflows/team-app-ci.yml
+#     git add .github/workflows/team-app-ci.yml
+#     git commit -m "ci(team-app): add team-app-ci workflow per Story 1.1"
+#
+# Once that lands, the three jobs (backend test, frontend lint+build,
+# migrate-test placeholder) gate every PR that touches `team-app/**`.
+# =============================================================================
+name: team-app CI
+
+on:
+  push:
+    branches: [main, bmad-self-host]
+    paths:
+      - "team-app/**"
+      - ".github/workflows/team-app-ci.yml"
+  pull_request:
+    paths:
+      - "team-app/**"
+      - ".github/workflows/team-app-ci.yml"
+
+concurrency:
+  group: team-app-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  team-app-backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_DB: team_app
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d team_app"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/team_app?sslmode=disable
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.1"
+          cache-dependency-path: team-app/go.sum
+
+      - name: Build
+        run: cd team-app && go build ./...
+
+      - name: Test
+        run: cd team-app && go test -race ./...
+
+  team-app-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        working-directory: team-app/frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        working-directory: team-app/frontend
+        run: pnpm lint
+
+      - name: Build
+        working-directory: team-app/frontend
+        run: pnpm build
+
+  team-app-migrate-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Placeholder
+        run: echo "migration runner lands in Story 1.6"
