@@ -520,6 +520,156 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// SPEC: §6.1 #6, §22 M-PR#3 — Story 1.4 read portion. Workspace-scoped
+// backfill endpoint for the standalone autofill: filter comments by
+// (author_id, type, date) where date is interpreted in the workspace
+// timezone (UTC fallback) and converted to a [start, end) range at the
+// handler boundary.
+//
+// NOTE: Returns agent-authored comments too. Per spec §14 + epic 1.4 AC,
+// the standalone app filters by author_type='member' on its side. Do NOT
+// add an author_type='member' filter here — the conflicting spec §6.1 #6
+// line is overridden by the epic AC + §14 (and by the §22 M-PR#3 tests).
+func (h *Handler) ListCommentsForBackfill(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	workspaceID := chi.URLParam(r, "id")
+	if workspaceID == "" {
+		writeError(w, http.StatusBadRequest, "workspace id is required")
+		return
+	}
+	wsUUID := parseUUID(workspaceID)
+	if !wsUUID.Valid {
+		writeError(w, http.StatusBadRequest, "invalid workspace id")
+		return
+	}
+
+	q := r.URL.Query()
+
+	rawAuthor := q.Get("author_id")
+	if rawAuthor == "" {
+		writeError(w, http.StatusBadRequest, "author_id is required")
+		return
+	}
+	authorUUID := parseUUID(rawAuthor)
+	if !authorUUID.Valid {
+		writeError(w, http.StatusBadRequest, "invalid author_id")
+		return
+	}
+
+	commentType := q.Get("type")
+	if commentType == "" {
+		writeError(w, http.StatusBadRequest, "type is required")
+		return
+	}
+
+	rawDate := q.Get("date")
+	if rawDate == "" {
+		writeError(w, http.StatusBadRequest, "date is required")
+		return
+	}
+	day, err := time.Parse("2006-01-02", rawDate)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid date; expected YYYY-MM-DD")
+		return
+	}
+
+	loc := workspaceTimezone(ctx, h.Queries, wsUUID)
+	start := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, loc)
+	end := start.Add(24 * time.Hour)
+
+	cursorTS, cursorID, err := parseCursor(q.Get("cursor"))
+	if err != nil {
+		writeInvalidCursor(w)
+		return
+	}
+
+	limit, err := parseLimit(q.Get("limit"), 200, 1000)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid limit; must be 1-1000")
+		return
+	}
+
+	cursorTSCol := pgtype.Timestamptz{}
+	if !cursorTS.IsZero() {
+		cursorTSCol = pgtype.Timestamptz{Time: cursorTS, Valid: true}
+	}
+
+	rows, err := h.Queries.ListCommentsByAuthorTypeDate(ctx, db.ListCommentsByAuthorTypeDateParams{
+		WorkspaceID:     wsUUID,
+		AuthorID:        authorUUID,
+		Type:            commentType,
+		CreatedAt:       pgtype.Timestamptz{Time: start, Valid: true},
+		CreatedAt_2:     pgtype.Timestamptz{Time: end, Valid: true},
+		Limit:           int32(limit + 1),
+		CursorCreatedAt: cursorTSCol,
+		CursorID:        cursorID,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list comments")
+		return
+	}
+
+	hasMore := len(rows) > limit
+	if hasMore {
+		rows = rows[:limit]
+	}
+
+	resp := make([]CommentResponse, len(rows))
+	for i, c := range rows {
+		// Reactions/attachments enrichment is not needed by the autofill
+		// consumer (see Subtask 2.5); pass nil so commentToResponse uses the
+		// canonical empty-slice defaults.
+		resp[i] = commentToResponse(c, nil, nil)
+	}
+
+	var nextCursor *string
+	if hasMore && len(rows) > 0 {
+		last := rows[len(rows)-1]
+		c := encodeCursor(last.CreatedAt.Time, last.ID)
+		nextCursor = &c
+	}
+
+	total, err := h.Queries.CountCommentsByAuthorTypeDate(ctx, db.CountCommentsByAuthorTypeDateParams{
+		WorkspaceID: wsUUID,
+		AuthorID:    authorUUID,
+		Type:        commentType,
+		CreatedAt:   pgtype.Timestamptz{Time: start, Valid: true},
+		CreatedAt_2: pgtype.Timestamptz{Time: end, Valid: true},
+	})
+	if err != nil {
+		total = int64(len(resp))
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"comments":    resp,
+		"next_cursor": nextCursor,
+		"total":       total,
+	})
+}
+
+// workspaceTimezone returns the IANA location named by the workspace's
+// settings.timezone field, falling back to UTC. The autofill consumer is
+// timezone-aware on its side; this just gives a deterministic [start, end)
+// for the date filter.
+func workspaceTimezone(ctx context.Context, q *db.Queries, wsID pgtype.UUID) *time.Location {
+	ws, err := q.GetWorkspace(ctx, wsID)
+	if err != nil || len(ws.Settings) == 0 {
+		return time.UTC
+	}
+	var settings struct {
+		Timezone string `json:"timezone"`
+	}
+	if err := json.Unmarshal(ws.Settings, &settings); err != nil || settings.Timezone == "" {
+		return time.UTC
+	}
+	loc, err := time.LoadLocation(settings.Timezone)
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}
+
 func (h *Handler) DeleteComment(w http.ResponseWriter, r *http.Request) {
 	commentId := chi.URLParam(r, "commentId")
 

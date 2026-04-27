@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -192,4 +193,144 @@ func (h *Handler) GetAssigneeFrequency(w http.ResponseWriter, r *http.Request) {
 	})
 
 	writeJSON(w, http.StatusOK, result)
+}
+
+// ActivityResponse is the JSON shape returned by ListWorkspaceActivity. Field
+// layout mirrors the activity slice of TimelineEntry so the standalone
+// reconciler can parse both endpoints with one struct.
+type ActivityResponse struct {
+	ID          string          `json:"id"`
+	WorkspaceID string          `json:"workspace_id"`
+	IssueID     *string         `json:"issue_id"`
+	ActorType   *string         `json:"actor_type"`
+	ActorID     string          `json:"actor_id"`
+	Action      string          `json:"action"`
+	Details     json.RawMessage `json:"details,omitempty"`
+	CreatedAt   string          `json:"created_at"`
+}
+
+func activityToResponse(a db.ActivityLog) ActivityResponse {
+	resp := ActivityResponse{
+		ID:          uuidToString(a.ID),
+		WorkspaceID: uuidToString(a.WorkspaceID),
+		IssueID:     uuidToPtr(a.IssueID),
+		ActorType:   textToPtr(a.ActorType),
+		ActorID:     uuidToString(a.ActorID),
+		Action:      a.Action,
+		CreatedAt:   timestampToString(a.CreatedAt),
+	}
+	if len(a.Details) > 0 {
+		resp.Details = json.RawMessage(a.Details)
+	}
+	return resp
+}
+
+// SPEC: §6.1 #5, §19.17, §22 M-PR#3 — Story 1.4 read portion. Workspace-
+// scoped activity scan for the team-app reconciler's gate-bypass detection.
+// Cursor format <RFC3339Nano>:<UUID>; fetch limit+1 to set next_cursor only
+// when more rows exist.
+func (h *Handler) ListWorkspaceActivity(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	workspaceID := chi.URLParam(r, "id")
+	if workspaceID == "" {
+		writeError(w, http.StatusBadRequest, "workspace id is required")
+		return
+	}
+	wsUUID := parseUUID(workspaceID)
+	if !wsUUID.Valid {
+		writeError(w, http.StatusBadRequest, "invalid workspace id")
+		return
+	}
+
+	q := r.URL.Query()
+
+	rawSince := q.Get("since")
+	if rawSince == "" {
+		writeError(w, http.StatusBadRequest, "since is required")
+		return
+	}
+	since, err := time.Parse(time.RFC3339, rawSince)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid since; expected RFC3339")
+		return
+	}
+
+	var actionFilter pgtype.Text
+	if a := q.Get("action"); a != "" {
+		actionFilter = pgtype.Text{String: a, Valid: true}
+	}
+
+	var actorFilter pgtype.UUID
+	if a := q.Get("actor_id"); a != "" {
+		actorFilter = parseUUID(a)
+		if !actorFilter.Valid {
+			writeError(w, http.StatusBadRequest, "invalid actor_id")
+			return
+		}
+	}
+
+	cursorTS, cursorID, err := parseCursor(q.Get("cursor"))
+	if err != nil {
+		writeInvalidCursor(w)
+		return
+	}
+
+	limit, err := parseLimit(q.Get("limit"), 200, 1000)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid limit; must be 1-1000")
+		return
+	}
+
+	cursorTSCol := pgtype.Timestamptz{}
+	if !cursorTS.IsZero() {
+		cursorTSCol = pgtype.Timestamptz{Time: cursorTS, Valid: true}
+	}
+
+	rows, err := h.Queries.ListActivityByWorkspace(ctx, db.ListActivityByWorkspaceParams{
+		WorkspaceID:     wsUUID,
+		CreatedAt:       pgtype.Timestamptz{Time: since, Valid: true},
+		Limit:           int32(limit + 1),
+		Action:          actionFilter,
+		ActorID:         actorFilter,
+		CursorCreatedAt: cursorTSCol,
+		CursorID:        cursorID,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list activity")
+		return
+	}
+
+	hasMore := len(rows) > limit
+	if hasMore {
+		rows = rows[:limit]
+	}
+
+	resp := make([]ActivityResponse, len(rows))
+	for i, a := range rows {
+		resp[i] = activityToResponse(a)
+	}
+
+	var nextCursor *string
+	if hasMore && len(rows) > 0 {
+		last := rows[len(rows)-1]
+		c := encodeCursor(last.CreatedAt.Time, last.ID)
+		nextCursor = &c
+	}
+
+	total, err := h.Queries.CountActivityByWorkspace(ctx, db.CountActivityByWorkspaceParams{
+		WorkspaceID: wsUUID,
+		CreatedAt:   pgtype.Timestamptz{Time: since, Valid: true},
+		Action:      actionFilter,
+		ActorID:     actorFilter,
+	})
+	if err != nil {
+		total = int64(len(resp))
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"activity":    resp,
+		"next_cursor": nextCursor,
+		"total":       total,
+	})
 }
