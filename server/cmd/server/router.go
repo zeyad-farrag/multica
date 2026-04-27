@@ -239,6 +239,13 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analytics
 					r.Post("/labels", h.CreateWorkspaceLabel)
 					r.Patch("/labels/{labelId}", h.UpdateWorkspaceLabel)
 					r.Delete("/labels/{labelId}", h.DeleteWorkspaceLabel)
+					// SPEC: §6.1 #3/#5/#6, §22 M-PR#3 — Story 1.4 read portion.
+					// Reconciler / autofill backfill endpoints. Auth +
+					// workspace membership inherited from outer Auth group +
+					// this Member-level group → 401 / 403 fall out for free.
+					r.Get("/issues", h.ListIssuesUpdatedSinceForWorkspace)
+					r.Get("/comments", h.ListCommentsForBackfill)
+					r.Get("/activity", h.ListWorkspaceActivity)
 				})
 				// Admin-level access
 				r.Group(func(r chi.Router) {

@@ -923,3 +923,116 @@ func TestWebSocketIntegration(t *testing.T) {
 		t.Fatalf("expected type 'issue:deleted', got '%s'", deleteMsg["type"])
 	}
 }
+
+// SPEC: §6.1 #3/#5/#6, §22 M-PR#3 — Story 1.4 read portion. Smoke test that
+// the three new workspace-scoped read endpoints are wired through the real
+// router and inherit Auth + workspace-membership middleware (AC-7, AC-8).
+func TestStory14ReadEndpointsRouted(t *testing.T) {
+	ctx := context.Background()
+
+	endpoints := []struct {
+		path  string
+		query string
+	}{
+		{"/issues", "updated_since=2020-01-01T00:00:00Z"},
+		{"/comments", "author_id=" + testUserID + "&type=comment&date=2020-01-01"},
+		{"/activity", "since=2020-01-01T00:00:00Z"},
+	}
+
+	for _, ep := range endpoints {
+		t.Run(ep.path, func(t *testing.T) {
+			full := "/api/workspaces/" + testWorkspaceID + ep.path + "?" + ep.query
+
+			// 200 with valid JWT + member.
+			resp := authRequest(t, "GET", full, nil)
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				t.Fatalf("authed: expected 200, got %d: %s", resp.StatusCode, body)
+			}
+
+			// 401 without auth header.
+			req, _ := http.NewRequest("GET", testServer.URL+full, nil)
+			respUnauth, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("unauth req: %v", err)
+			}
+			respUnauth.Body.Close()
+			if respUnauth.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("unauth: expected 401, got %d", respUnauth.StatusCode)
+			}
+
+			// Non-member: create a fresh user with a JWT but no membership in
+			// this workspace. The shared middleware returns 404
+			// "workspace not found" for non-members (membership lookup is the
+			// gate), which is the spec-equivalent of the AC-8 "non-member is
+			// rejected" requirement — production callers cannot distinguish
+			// this from a missing workspace, by design.
+			otherEmail := fmt.Sprintf("tim4-nonmember-%d@multica.ai", time.Now().UnixNano())
+			var otherID string
+			if err := testPool.QueryRow(ctx, `
+				INSERT INTO "user" (name, email) VALUES ('Non Member', $1) RETURNING id
+			`, otherEmail).Scan(&otherID); err != nil {
+				t.Fatalf("seed non-member user: %v", err)
+			}
+			defer testPool.Exec(ctx, `DELETE FROM "user" WHERE id = $1`, otherID)
+
+			otherToken, err := generateTestJWT(otherID, otherEmail, "Non Member")
+			if err != nil {
+				t.Fatalf("non-member jwt: %v", err)
+			}
+			req2, _ := http.NewRequest("GET", testServer.URL+full, nil)
+			req2.Header.Set("Authorization", "Bearer "+otherToken)
+			respNon, err := http.DefaultClient.Do(req2)
+			if err != nil {
+				t.Fatalf("non-member req: %v", err)
+			}
+			respNon.Body.Close()
+			if respNon.StatusCode != http.StatusNotFound && respNon.StatusCode != http.StatusForbidden {
+				t.Fatalf("non-member: expected 403 or 404, got %d", respNon.StatusCode)
+			}
+		})
+	}
+}
+
+// SPEC: Scope-Boundary row 4 — `GET /api/workspaces/{id}` must pass
+// settings.work_week through unchanged so the standalone team-app can read
+// it without a parallel endpoint. WorkspaceResponse already passes settings
+// JSONB through as `any`; this regression test pins the behavior.
+func TestWorkspaceResponseSettingsWorkWeek(t *testing.T) {
+	ctx := context.Background()
+
+	// Stamp a known work_week onto the existing workspace, then read it back.
+	if _, err := testPool.Exec(ctx, `
+		UPDATE workspace SET settings = jsonb_set(
+		  COALESCE(settings, '{}'::jsonb),
+		  '{work_week}',
+		  '["mon","tue","wed","thu","fri"]'::jsonb,
+		  true
+		)
+		WHERE id = $1
+	`, testWorkspaceID); err != nil {
+		t.Fatalf("update settings: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(ctx, `UPDATE workspace SET settings = '{}'::jsonb WHERE id = $1`, testWorkspaceID)
+	})
+
+	resp := authRequest(t, "GET", "/api/workspaces/"+testWorkspaceID, nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
+	}
+	var body struct {
+		Settings map[string]any `json:"settings"`
+	}
+	readJSON(t, resp, &body)
+	got, ok := body.Settings["work_week"].([]any)
+	if !ok {
+		t.Fatalf("expected settings.work_week to be a list, got %T (%v)", body.Settings["work_week"], body.Settings)
+	}
+	if len(got) != 5 {
+		t.Fatalf("expected 5 work_week entries, got %d: %v", len(got), got)
+	}
+}
