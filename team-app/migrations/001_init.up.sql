@@ -1,0 +1,1 @@
+-- TIM-6 Initial schema: 4 mirror tables + 8 domain tables (v2 keying, pre-org)

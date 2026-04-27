@@ -1,0 +1,1 @@
+-- TIM-6 sqlc query stub covering member_leave

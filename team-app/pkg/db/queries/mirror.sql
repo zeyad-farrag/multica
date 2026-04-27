@@ -1,0 +1,1 @@
+-- TIM-6 sqlc query stubs covering mirror_workspace, mirror_user, mirror_member, mirror_issue

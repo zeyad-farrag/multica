@@ -1,0 +1,1 @@
+-- TIM-6 Strict inverse of 001_init.up.sql — drops the 12 tables in reverse creation order

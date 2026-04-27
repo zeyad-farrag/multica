@@ -1,0 +1,1 @@
+-- TIM-6 sqlc query stubs covering time_confirm and time_confirm_history
