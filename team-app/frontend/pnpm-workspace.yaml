@@ -1,0 +1,15 @@
+# Self-rooted pnpm workspace for the team-app frontend.
+#
+# Without this file, pnpm climbs to the repo root's pnpm-workspace.yaml
+# (which lists only `apps/*` and `packages/*`) and silently no-ops here:
+# `pnpm install --frozen-lockfile` exits 0 without populating `node_modules`
+# and downstream `pnpm lint` / `pnpm build` fail with "node_modules missing".
+#
+# An empty `packages` list signals to pnpm "this directory is its own
+# workspace root with no member packages" — so install resolves the
+# local `package.json` and `pnpm-lock.yaml` deterministically.
+#
+# Per Story 1.1 Dev Notes / impl-plan: do NOT add `team-app/frontend` to
+# the root `pnpm-workspace.yaml`; this directory has its own pnpm install
+# lifecycle.
+packages: []

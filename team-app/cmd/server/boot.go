@@ -58,6 +58,18 @@ func validateEnv() error {
 	return nil
 }
 
+// readDatabaseURL returns DATABASE_URL or a MissingEnvVarError when unset/empty.
+// DATABASE_URL is consumed by pgxpool.New rather than the AR8 env-var contract,
+// but the boot-validation shape ("missing_env_var=<NAME>" + non-zero exit) is
+// uniform with validateEnv.
+func readDatabaseURL() (string, error) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		return "", &MissingEnvVarError{Name: "DATABASE_URL"}
+	}
+	return dsn, nil
+}
+
 // missingEnvVar reports whether err is a MissingEnvVarError for the given name.
 func missingEnvVar(err error, name string) bool {
 	var m *MissingEnvVarError

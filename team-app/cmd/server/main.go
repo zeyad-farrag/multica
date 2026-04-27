@@ -44,12 +44,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		logger.Error("boot validation failed",
-			slog.String("missing_env_var", "DATABASE_URL"),
-			slog.String("outcome", "boot_aborted"),
-		)
+	dsn, err := readDatabaseURL()
+	if err != nil {
+		var miss *MissingEnvVarError
+		if errors.As(err, &miss) {
+			logger.Error("boot validation failed",
+				slog.String("missing_env_var", miss.Name),
+				slog.String("reason", miss.Reason),
+				slog.String("outcome", "boot_aborted"),
+			)
+		} else {
+			logger.Error("boot validation failed",
+				slog.String("error", err.Error()),
+				slog.String("outcome", "boot_aborted"),
+			)
+		}
 		os.Exit(1)
 	}
 

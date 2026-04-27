@@ -43,7 +43,7 @@ pnpm lint                 # enforces the package-boundary rules below
 pnpm build
 ```
 
-`team-app/frontend` has its own `pnpm install` lifecycle and is **not** part of the root `pnpm-workspace.yaml`. The local `.npmrc` (`ignore-workspace=true`) ensures `pnpm install` here does not touch the root lockfile.
+`team-app/frontend` has its own `pnpm install` lifecycle and is **not** part of the root `pnpm-workspace.yaml`. A local `pnpm-workspace.yaml` declares the directory a self-rooted workspace (`packages: []`), so `pnpm install` resolves against the local `pnpm-lock.yaml` instead of climbing to the repo root and silently no-op'ing.
 
 ## Project layout
 
@@ -73,7 +73,7 @@ team-app/
 │   │   ├── core/team/         # Headless logic — boundary enforced by ESLint (AR22)
 │   │   └── views/team/        # Cross-platform views — boundary enforced by ESLint (AR22)
 │   ├── eslint.config.mjs      # no-restricted-imports rules per AR22
-│   └── .npmrc                 # ignore-workspace=true (own pnpm lifecycle)
+│   └── pnpm-workspace.yaml    # self-rooted workspace (own pnpm lifecycle)
 ├── nginx/team.conf            # /api/, /gates/, /api/v1/orgs/.+/events SSE, catch-all → frontend
 ├── docker-compose.yml         # db / api / frontend / nginx
 ├── Dockerfile                 # Go server image (golang:1.26-alpine → distroless)

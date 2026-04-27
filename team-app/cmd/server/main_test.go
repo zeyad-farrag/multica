@@ -119,3 +119,35 @@ func TestValidateEnv_OrgCreationEnabled_AcceptsCaseInsensitiveBool(t *testing.T)
 		})
 	}
 }
+
+func TestReadDatabaseURL_Missing_ReturnsMissingEnvVarError(t *testing.T) {
+	t.Setenv("DATABASE_URL", "")
+
+	dsn, err := readDatabaseURL()
+	if err == nil {
+		t.Fatalf("readDatabaseURL() with empty DATABASE_URL returned dsn=%q nil err; want MissingEnvVarError", dsn)
+	}
+	var miss *MissingEnvVarError
+	if !errors.As(err, &miss) {
+		t.Fatalf("readDatabaseURL() returned %T (%v); want *MissingEnvVarError", err, err)
+	}
+	if miss.Name != "DATABASE_URL" {
+		t.Fatalf("readDatabaseURL() reported missing %q; want DATABASE_URL", miss.Name)
+	}
+	if !missingEnvVar(err, "DATABASE_URL") {
+		t.Fatalf("missingEnvVar(err, %q) = false; want true", "DATABASE_URL")
+	}
+}
+
+func TestReadDatabaseURL_Set_ReturnsValue(t *testing.T) {
+	want := "postgresql://postgres:postgres@db:5432/team_app?sslmode=disable"
+	t.Setenv("DATABASE_URL", want)
+
+	got, err := readDatabaseURL()
+	if err != nil {
+		t.Fatalf("readDatabaseURL() with DATABASE_URL set returned err=%v; want nil", err)
+	}
+	if got != want {
+		t.Fatalf("readDatabaseURL() = %q; want %q", got, want)
+	}
+}
