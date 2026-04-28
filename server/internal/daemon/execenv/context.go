@@ -111,7 +111,19 @@ func writeSkillFiles(skillsDir string, skills []SkillContextForEnv) error {
 		}
 
 		// Write main SKILL.md
-		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(skill.Content), 0o644); err != nil {
+		// Codex requires a YAML frontmatter block (--- name: <id> ---) at the
+		// top of every SKILL.md it loads. The shared skill.Content from
+		// Postgres is a plain Markdown body, so prepend a minimal frontmatter
+		// when one is missing. Other providers (Claude, Copilot, etc.)
+		// tolerate the leading frontmatter just fine.
+		skillContent := skill.Content
+		if !strings.HasPrefix(strings.TrimLeft(skillContent, " \t\n\r"), "---") {
+			// Codex requires both `name` and `description` fields in
+			// frontmatter; use the skill name as a fallback description
+			// when none is available.
+			skillContent = "---\nname: " + sanitizeSkillName(skill.Name) + "\ndescription: " + sanitizeSkillName(skill.Name) + " skill\n---\n" + skillContent
+		}
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(skillContent), 0o644); err != nil {
 			return err
 		}
 
