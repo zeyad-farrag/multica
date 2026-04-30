@@ -149,6 +149,10 @@ GPT-5
 - `cd server && GOCACHE=/tmp/multica-gocache go test ./cmd/server ./internal/handler` — passed.
 - `cd server && GOCACHE=/tmp/multica-gocache go test ./...` — failed in pre-existing/non-touched `server/internal/daemon/execenv` tests: `TestReuseWritesMissingCodexWorkspaceSkills`, `TestReuseUpdatesCodexWorkspaceSkills`.
 - `GOCACHE=/tmp/multica-gocache make check` — attempted twice after generating `.env.worktree`; Docker socket access was denied while ensuring Postgres (`pgvector/pgvector:pg17`), and the script still printed `✓ All checks passed.` without running the full gate.
+- `cd server && GOCACHE=/tmp/multica-gocache go test ./internal/handler -run 'TestCursor|TestListIssuesUpdatedSinceCursorStrictAfter|TestListCommentsForBackfillIncludesAgentRowsAndCursor|TestListWorkspaceActivityFiltersAndPaginates'` — passed after the decision-resolved cursor fix.
+- `cd server && GOCACHE=/tmp/multica-gocache go test ./cmd/server -run TestTeamAppReadEndpointsAuthAndShape` — passed after the decision-resolved 403 membership fix.
+- `cd server && GOCACHE=/tmp/multica-gocache go test ./internal/middleware ./cmd/server ./internal/handler` — passed.
+- `cd server && GOCACHE=/tmp/multica-gocache go test ./...` — still fails only in pre-existing/non-touched `server/internal/daemon/execenv` tests: `TestReuseWritesMissingCodexWorkspaceSkills`, `TestReuseUpdatesCodexWorkspaceSkills`.
 
 ### Completion Notes List
 
@@ -156,6 +160,7 @@ GPT-5
 - Added query stanzas and regenerated sqlc outputs.
 - Added route wiring inside the existing authenticated workspace-member group.
 - Added unit and integration coverage for cursor helpers, strict-after paging, agent-authored comment inclusion, auth/membership behavior, and `settings.work_week` pass-through.
+- Applied the planning decision after test RED: cursor encoding now normalizes to UTC before formatting, and the three TIM-4 workspace read routes use a new 403-on-membership-miss middleware variant without changing legacy workspace route behavior.
 
 ### File List
 
@@ -174,5 +179,6 @@ GPT-5
 - `server/internal/handler/comment_backfill_test.go`
 - `server/internal/handler/activity_workspace_test.go`
 - `server/internal/handler/workspace_test.go`
+- `server/internal/middleware/workspace.go`
 - `server/cmd/server/router.go`
 - `server/cmd/server/integration_test.go`

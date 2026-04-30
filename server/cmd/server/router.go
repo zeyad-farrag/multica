@@ -240,9 +240,6 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analytics
 				r.Group(func(r chi.Router) {
 					r.Use(middleware.RequireWorkspaceMemberFromURL(queries, "id"))
 					r.Get("/", h.GetWorkspace)
-					r.Get("/issues", h.ListIssuesUpdatedSinceForWorkspace)
-					r.Get("/comments", h.ListCommentsForBackfill)
-					r.Get("/activity", h.ListWorkspaceActivity)
 					r.Get("/members", h.ListMembersWithUser)
 					r.Post("/leave", h.LeaveWorkspace)
 					r.Get("/invitations", h.ListWorkspaceInvitations)
@@ -252,6 +249,13 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analytics
 					r.Post("/labels", h.CreateWorkspaceLabel)
 					r.Patch("/labels/{labelId}", h.UpdateWorkspaceLabel)
 					r.Delete("/labels/{labelId}", h.DeleteWorkspaceLabel)
+				})
+				// TIM-4 standalone-app read endpoints require 403 on non-membership.
+				r.Group(func(r chi.Router) {
+					r.Use(middleware.RequireWorkspaceMember403FromURL(queries, "id"))
+					r.Get("/issues", h.ListIssuesUpdatedSinceForWorkspace)
+					r.Get("/comments", h.ListCommentsForBackfill)
+					r.Get("/activity", h.ListWorkspaceActivity)
 				})
 				// Admin-level access
 				r.Group(func(r chi.Router) {

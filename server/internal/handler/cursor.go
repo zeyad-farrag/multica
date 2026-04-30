@@ -29,7 +29,7 @@ func parseCursor(s string) (time.Time, pgtype.UUID, error) {
 }
 
 func encodeCursor(t time.Time, id pgtype.UUID) string {
-	return t.Format(time.RFC3339Nano) + ":" + uuidToString(id)
+	return t.UTC().Format(time.RFC3339Nano) + ":" + uuidToString(id)
 }
 
 func parseLimit(r *http.Request, defaultLimit, maxLimit int32) (int32, bool) {

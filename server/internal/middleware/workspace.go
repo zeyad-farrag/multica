@@ -134,13 +134,13 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // (fallback), validates membership, and injects the member and workspace ID
 // into the request context.
 func RequireWorkspaceMember(queries *db.Queries) func(http.Handler) http.Handler {
-	return buildMiddleware(queries, resolveWorkspaceUUID(queries), nil)
+	return buildMiddleware(queries, resolveWorkspaceUUID(queries), nil, http.StatusNotFound)
 }
 
 // RequireWorkspaceRole is like RequireWorkspaceMember but additionally checks
 // that the member has one of the specified roles.
 func RequireWorkspaceRole(queries *db.Queries, roles ...string) func(http.Handler) http.Handler {
-	return buildMiddleware(queries, resolveWorkspaceUUID(queries), roles)
+	return buildMiddleware(queries, resolveWorkspaceUUID(queries), roles, http.StatusNotFound)
 }
 
 // RequireWorkspaceMemberFromURL resolves the workspace ID from a chi URL
@@ -152,7 +152,19 @@ func RequireWorkspaceMemberFromURL(queries *db.Queries, param string) func(http.
 			return "", nil
 		}
 		return id, nil
-	}, nil)
+	}, nil, http.StatusNotFound)
+}
+
+// RequireWorkspaceMember403FromURL is for known-workspace system integrations
+// whose contract distinguishes non-membership (403) from unknown workspaces (404).
+func RequireWorkspaceMember403FromURL(queries *db.Queries, param string) func(http.Handler) http.Handler {
+	return buildMiddleware(queries, func(r *http.Request) (string, error) {
+		id := chi.URLParam(r, param)
+		if id == "" {
+			return "", nil
+		}
+		return id, nil
+	}, nil, http.StatusForbidden)
 }
 
 // RequireWorkspaceRoleFromURL is like RequireWorkspaceMemberFromURL but
@@ -164,10 +176,10 @@ func RequireWorkspaceRoleFromURL(queries *db.Queries, param string, roles ...str
 			return "", nil
 		}
 		return id, nil
-	}, roles)
+	}, roles, http.StatusNotFound)
 }
 
-func buildMiddleware(queries *db.Queries, resolve workspaceResolver, roles []string) func(http.Handler) http.Handler {
+func buildMiddleware(queries *db.Queries, resolve workspaceResolver, roles []string, memberMissStatus int) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			workspaceID, resolveErr := resolve(r)
@@ -191,7 +203,7 @@ func buildMiddleware(queries *db.Queries, resolve workspaceResolver, roles []str
 				WorkspaceID: util.ParseUUID(workspaceID),
 			})
 			if err != nil {
-				writeError(w, http.StatusNotFound, "workspace not found")
+				writeError(w, memberMissStatus, "workspace not found")
 				return
 			}
 
