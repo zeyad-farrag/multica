@@ -13,16 +13,16 @@ import (
 var errInvalidCursor = errors.New("invalid cursor")
 
 func parseCursor(s string) (time.Time, pgtype.UUID, error) {
-	parts := strings.SplitN(s, ":", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+	split := strings.LastIndexByte(s, ':')
+	if split <= 0 || split == len(s)-1 {
 		return time.Time{}, pgtype.UUID{}, errInvalidCursor
 	}
-	t, err := time.Parse(time.RFC3339Nano, parts[0])
+	t, err := time.Parse(time.RFC3339Nano, s[:split])
 	if err != nil {
 		return time.Time{}, pgtype.UUID{}, errInvalidCursor
 	}
 	var id pgtype.UUID
-	if err := id.Scan(parts[1]); err != nil || !id.Valid {
+	if err := id.Scan(s[split+1:]); err != nil || !id.Valid {
 		return time.Time{}, pgtype.UUID{}, errInvalidCursor
 	}
 	return t, id, nil
