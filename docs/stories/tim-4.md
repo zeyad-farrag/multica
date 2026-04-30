@@ -138,8 +138,41 @@ NOT touched in this story: `server/internal/handler/inbox.go`, `server/internal/
 
 ### Agent Model Used
 
+GPT-5
+
 ### Debug Log References
+
+- `make sqlc` — passed.
+- `cd server && GOCACHE=/tmp/multica-gocache go test ./internal/handler -run 'Test(Cursor|ListIssuesUpdatedSince|ListIssuesLegacy|ListCommentsForBackfill|ListWorkspaceActivity|GetWorkspacePassesThroughWorkWeekSettings)'` — passed.
+- `cd server && GOCACHE=/tmp/multica-gocache go test ./cmd/server -run TestTeamAppReadEndpointsAuthAndShape` — passed.
+- `cd server && GOCACHE=/tmp/multica-gocache go test ./internal/handler/...` — passed.
+- `cd server && GOCACHE=/tmp/multica-gocache go test ./cmd/server ./internal/handler` — passed.
+- `cd server && GOCACHE=/tmp/multica-gocache go test ./...` — failed in pre-existing/non-touched `server/internal/daemon/execenv` tests: `TestReuseWritesMissingCodexWorkspaceSkills`, `TestReuseUpdatesCodexWorkspaceSkills`.
+- `GOCACHE=/tmp/multica-gocache make check` — attempted twice after generating `.env.worktree`; Docker socket access was denied while ensuring Postgres (`pgvector/pgvector:pg17`), and the script still printed `✓ All checks passed.` without running the full gate.
 
 ### Completion Notes List
 
+- Implemented workspace-scoped read endpoints for issues, comments, and activity with RFC3339 cursor pagination and count totals.
+- Added query stanzas and regenerated sqlc outputs.
+- Added route wiring inside the existing authenticated workspace-member group.
+- Added unit and integration coverage for cursor helpers, strict-after paging, agent-authored comment inclusion, auth/membership behavior, and `settings.work_week` pass-through.
+
 ### File List
+
+- `server/pkg/db/queries/issue.sql`
+- `server/pkg/db/queries/comment.sql`
+- `server/pkg/db/queries/activity.sql`
+- `server/pkg/db/generated/issue.sql.go`
+- `server/pkg/db/generated/comment.sql.go`
+- `server/pkg/db/generated/activity.sql.go`
+- `server/internal/handler/cursor.go`
+- `server/internal/handler/issue.go`
+- `server/internal/handler/comment.go`
+- `server/internal/handler/activity.go`
+- `server/internal/handler/cursor_test.go`
+- `server/internal/handler/issue_updated_since_test.go`
+- `server/internal/handler/comment_backfill_test.go`
+- `server/internal/handler/activity_workspace_test.go`
+- `server/internal/handler/workspace_test.go`
+- `server/cmd/server/router.go`
+- `server/cmd/server/integration_test.go`

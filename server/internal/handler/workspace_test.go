@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -31,6 +32,42 @@ func TestCreateWorkspace_RejectsReservedSlug(t *testing.T) {
 				t.Fatalf("slug %q: expected 400, got %d: %s", slug, w.Code, w.Body.String())
 			}
 		})
+	}
+}
+
+func TestGetWorkspacePassesThroughWorkWeekSettings(t *testing.T) {
+	ctx := context.Background()
+	_, err := testPool.Exec(ctx, `
+		UPDATE workspace
+		SET settings = '{"timezone":"UTC","work_week":{"days":["mon","tue","wed","thu"],"hours_per_day":6}}'::jsonb
+		WHERE id = $1
+	`, testWorkspaceID)
+	if err != nil {
+		t.Fatalf("update settings: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := newRequest("GET", "/api/workspaces/"+testWorkspaceID, nil)
+	req = withURLParam(req, "id", testWorkspaceID)
+	testHandler.GetWorkspace(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp WorkspaceResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode workspace: %v", err)
+	}
+	settings, ok := resp.Settings.(map[string]any)
+	if !ok {
+		t.Fatalf("settings type = %T", resp.Settings)
+	}
+	workWeek, ok := settings["work_week"].(map[string]any)
+	if !ok {
+		t.Fatalf("work_week missing from settings: %+v", settings)
+	}
+	if workWeek["hours_per_day"].(float64) != 6 {
+		t.Fatalf("work_week not passed through: %+v", workWeek)
 	}
 }
 

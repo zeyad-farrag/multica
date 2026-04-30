@@ -183,11 +183,137 @@ func authRequest(t *testing.T, method, path string, body any) *http.Response {
 	return resp
 }
 
+func patForUser(t *testing.T, userID string) string {
+	t.Helper()
+	raw, err := auth.GeneratePATToken()
+	if err != nil {
+		t.Fatalf("generate PAT: %v", err)
+	}
+	prefix := raw
+	if len(prefix) > 12 {
+		prefix = prefix[:12]
+	}
+	if _, err := testPool.Exec(context.Background(), `
+		INSERT INTO personal_access_token (user_id, name, token_hash, token_prefix)
+		VALUES ($1, 'integration read endpoint', $2, $3)
+	`, userID, auth.HashToken(raw), prefix); err != nil {
+		t.Fatalf("insert PAT: %v", err)
+	}
+	return raw
+}
+
+func patRequest(t *testing.T, token, method, path string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(method, testServer.URL+path, nil)
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	return resp
+}
+
 func readJSON(t *testing.T, resp *http.Response, v any) {
 	t.Helper()
 	defer resp.Body.Close()
 	if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
+	}
+}
+
+func TestTeamAppReadEndpointsAuthAndShape(t *testing.T) {
+	ctx := context.Background()
+	pat := patForUser(t, testUserID)
+	ts := time.Date(2026, 4, 30, 11, 0, 0, 0, time.UTC)
+	issueID := "00000000-0000-0000-0000-000000000061"
+	authorID := "00000000-0000-0000-0000-000000000062"
+	if _, err := testPool.Exec(ctx, `
+		INSERT INTO issue (
+			id, workspace_id, title, status, priority, creator_type, creator_id,
+			position, number, created_at, updated_at
+		) VALUES ($1, $2, 'integration read issue', 'todo', 'none', 'member', $3, 9301, 9301, $4, $4)
+		ON CONFLICT (id) DO UPDATE SET updated_at = EXCLUDED.updated_at
+	`, issueID, testWorkspaceID, testUserID, ts); err != nil {
+		t.Fatalf("seed issue: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `
+		INSERT INTO comment (id, issue_id, workspace_id, author_type, author_id, content, type, created_at, updated_at)
+		VALUES ('00000000-0000-0000-0000-000000000063', $1, $2, 'member', $3, 'status changed', 'status_change', $4, $4)
+		ON CONFLICT (id) DO NOTHING
+	`, issueID, testWorkspaceID, authorID, ts); err != nil {
+		t.Fatalf("seed comment: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `
+		INSERT INTO activity_log (id, workspace_id, issue_id, actor_type, actor_id, action, details, created_at)
+		VALUES ('00000000-0000-0000-0000-000000000064', $1, $2, 'member', $3, 'gate_bypassed', '{}'::jsonb, $4)
+		ON CONFLICT (id) DO NOTHING
+	`, testWorkspaceID, issueID, testUserID, ts); err != nil {
+		t.Fatalf("seed activity: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, issueID)
+	})
+
+	for _, tc := range []struct {
+		name string
+		path string
+		key  string
+	}{
+		{"issues", "/api/workspaces/" + testWorkspaceID + "/issues?updated_since=" + ts.Format(time.RFC3339), "issues"},
+		{"comments", "/api/workspaces/" + testWorkspaceID + "/comments?author_id=" + authorID + "&type=status_change&date=2026-04-30", "comments"},
+		{"activity", "/api/workspaces/" + testWorkspaceID + "/activity?since=" + ts.Format(time.RFC3339) + "&action=gate_bypassed", "activity"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := patRequest(t, pat, http.MethodGet, tc.path)
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				t.Fatalf("expected 200, got %d: %s", resp.StatusCode, string(body))
+			}
+			var body map[string]any
+			readJSON(t, resp, &body)
+			if _, ok := body[tc.key]; !ok {
+				t.Fatalf("response missing %s: %+v", tc.key, body)
+			}
+			if _, ok := body["next_cursor"]; !ok {
+				t.Fatalf("response missing next_cursor: %+v", body)
+			}
+			if _, ok := body["total"]; !ok {
+				t.Fatalf("response missing total: %+v", body)
+			}
+
+			unauth := patRequest(t, "", http.MethodGet, tc.path)
+			unauth.Body.Close()
+			if unauth.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("missing PAT: expected 401, got %d", unauth.StatusCode)
+			}
+		})
+	}
+
+	var nonMemberID string
+	if _, err := testPool.Exec(ctx, `DELETE FROM "user" WHERE email = 'read-endpoint-nonmember@multica.ai'`); err != nil {
+		t.Fatalf("cleanup nonmember: %v", err)
+	}
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO "user" (name, email)
+		VALUES ('Read Endpoint Nonmember', 'read-endpoint-nonmember@multica.ai')
+		RETURNING id
+	`).Scan(&nonMemberID); err != nil {
+		t.Fatalf("seed nonmember: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(ctx, `DELETE FROM "user" WHERE id = $1`, nonMemberID)
+	})
+	nonMemberPAT := patForUser(t, nonMemberID)
+	forbidden := patRequest(t, nonMemberPAT, http.MethodGet, "/api/workspaces/"+testWorkspaceID+"/issues?updated_since="+ts.Format(time.RFC3339))
+	forbidden.Body.Close()
+	if forbidden.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-member PAT: expected 403, got %d", forbidden.StatusCode)
 	}
 }
 
