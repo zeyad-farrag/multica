@@ -54,7 +54,7 @@ UPDATE issue SET
     pr_repo    = NULL,
     updated_at = now()
 WHERE id = $1
-RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, pr_url, pr_number, pr_repo, phase_state
+RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, estimate_minutes, pr_url, pr_number, pr_repo, phase_state
 `
 
 func (q *Queries) ClearIssuePR(ctx context.Context, id pgtype.UUID) (Issue, error) {
@@ -83,12 +83,50 @@ func (q *Queries) ClearIssuePR(ctx context.Context, id pgtype.UUID) (Issue, erro
 		&i.OriginType,
 		&i.OriginID,
 		&i.FirstExecutedAt,
+		&i.EstimateMinutes,
 		&i.PrUrl,
 		&i.PrNumber,
 		&i.PrRepo,
 		&i.PhaseState,
 	)
 	return i, err
+}
+
+const computeIssueEstimateRollup = `-- name: ComputeIssueEstimateRollup :one
+WITH RECURSIVE descendants AS (
+    SELECT id, parent_issue_id, estimate_minutes, assignee_type
+    FROM issue
+    WHERE issue.parent_issue_id = $1
+      AND issue.workspace_id = $2
+    UNION ALL
+    SELECT i.id, i.parent_issue_id, i.estimate_minutes, i.assignee_type
+    FROM issue i
+    JOIN descendants d ON i.parent_issue_id = d.id
+    WHERE i.workspace_id = $2
+),
+leaves AS (
+    SELECT d.id, d.estimate_minutes, d.assignee_type
+    FROM descendants d
+    WHERE NOT EXISTS (
+        SELECT 1 FROM descendants c WHERE c.parent_issue_id = d.id
+    )
+)
+SELECT COALESCE(SUM(estimate_minutes), 0)::int AS total
+FROM leaves
+WHERE estimate_minutes IS NOT NULL
+  AND (assignee_type IS NULL OR assignee_type = 'member')
+`
+
+type ComputeIssueEstimateRollupParams struct {
+	IssueID     pgtype.UUID `json:"issue_id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) ComputeIssueEstimateRollup(ctx context.Context, arg ComputeIssueEstimateRollupParams) (int32, error) {
+	row := q.db.QueryRow(ctx, computeIssueEstimateRollup, arg.IssueID, arg.WorkspaceID)
+	var total int32
+	err := row.Scan(&total)
+	return total, err
 }
 
 const countCreatedIssueAssignees = `-- name: CountCreatedIssueAssignees :many
@@ -177,27 +215,29 @@ const createIssue = `-- name: CreateIssue :one
 INSERT INTO issue (
     workspace_id, title, description, status, priority,
     assignee_type, assignee_id, creator_type, creator_id,
-    parent_issue_id, position, due_date, number, project_id
+    parent_issue_id, position, due_date, number, project_id, estimate_minutes
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
-) RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, pr_url, pr_number, pr_repo, phase_state
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+    $15
+) RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, estimate_minutes, pr_url, pr_number, pr_repo, phase_state
 `
 
 type CreateIssueParams struct {
-	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
-	Title         string             `json:"title"`
-	Description   pgtype.Text        `json:"description"`
-	Status        string             `json:"status"`
-	Priority      string             `json:"priority"`
-	AssigneeType  pgtype.Text        `json:"assignee_type"`
-	AssigneeID    pgtype.UUID        `json:"assignee_id"`
-	CreatorType   string             `json:"creator_type"`
-	CreatorID     pgtype.UUID        `json:"creator_id"`
-	ParentIssueID pgtype.UUID        `json:"parent_issue_id"`
-	Position      float64            `json:"position"`
-	DueDate       pgtype.Timestamptz `json:"due_date"`
-	Number        int32              `json:"number"`
-	ProjectID     pgtype.UUID        `json:"project_id"`
+	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
+	Title           string             `json:"title"`
+	Description     pgtype.Text        `json:"description"`
+	Status          string             `json:"status"`
+	Priority        string             `json:"priority"`
+	AssigneeType    pgtype.Text        `json:"assignee_type"`
+	AssigneeID      pgtype.UUID        `json:"assignee_id"`
+	CreatorType     string             `json:"creator_type"`
+	CreatorID       pgtype.UUID        `json:"creator_id"`
+	ParentIssueID   pgtype.UUID        `json:"parent_issue_id"`
+	Position        float64            `json:"position"`
+	DueDate         pgtype.Timestamptz `json:"due_date"`
+	Number          int32              `json:"number"`
+	ProjectID       pgtype.UUID        `json:"project_id"`
+	EstimateMinutes pgtype.Int4        `json:"estimate_minutes"`
 }
 
 func (q *Queries) CreateIssue(ctx context.Context, arg CreateIssueParams) (Issue, error) {
@@ -216,6 +256,7 @@ func (q *Queries) CreateIssue(ctx context.Context, arg CreateIssueParams) (Issue
 		arg.DueDate,
 		arg.Number,
 		arg.ProjectID,
+		arg.EstimateMinutes,
 	)
 	var i Issue
 	err := row.Scan(
@@ -241,6 +282,7 @@ func (q *Queries) CreateIssue(ctx context.Context, arg CreateIssueParams) (Issue
 		&i.OriginType,
 		&i.OriginID,
 		&i.FirstExecutedAt,
+		&i.EstimateMinutes,
 		&i.PrUrl,
 		&i.PrNumber,
 		&i.PrRepo,
@@ -254,30 +296,31 @@ INSERT INTO issue (
     workspace_id, title, description, status, priority,
     assignee_type, assignee_id, creator_type, creator_id,
     parent_issue_id, position, due_date, number, project_id,
-    origin_type, origin_id
+    origin_type, origin_id, estimate_minutes
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-    $15, $16
-) RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, pr_url, pr_number, pr_repo, phase_state
+    $15, $16, $17
+) RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, estimate_minutes, pr_url, pr_number, pr_repo, phase_state
 `
 
 type CreateIssueWithOriginParams struct {
-	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
-	Title         string             `json:"title"`
-	Description   pgtype.Text        `json:"description"`
-	Status        string             `json:"status"`
-	Priority      string             `json:"priority"`
-	AssigneeType  pgtype.Text        `json:"assignee_type"`
-	AssigneeID    pgtype.UUID        `json:"assignee_id"`
-	CreatorType   string             `json:"creator_type"`
-	CreatorID     pgtype.UUID        `json:"creator_id"`
-	ParentIssueID pgtype.UUID        `json:"parent_issue_id"`
-	Position      float64            `json:"position"`
-	DueDate       pgtype.Timestamptz `json:"due_date"`
-	Number        int32              `json:"number"`
-	ProjectID     pgtype.UUID        `json:"project_id"`
-	OriginType    pgtype.Text        `json:"origin_type"`
-	OriginID      pgtype.UUID        `json:"origin_id"`
+	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
+	Title           string             `json:"title"`
+	Description     pgtype.Text        `json:"description"`
+	Status          string             `json:"status"`
+	Priority        string             `json:"priority"`
+	AssigneeType    pgtype.Text        `json:"assignee_type"`
+	AssigneeID      pgtype.UUID        `json:"assignee_id"`
+	CreatorType     string             `json:"creator_type"`
+	CreatorID       pgtype.UUID        `json:"creator_id"`
+	ParentIssueID   pgtype.UUID        `json:"parent_issue_id"`
+	Position        float64            `json:"position"`
+	DueDate         pgtype.Timestamptz `json:"due_date"`
+	Number          int32              `json:"number"`
+	ProjectID       pgtype.UUID        `json:"project_id"`
+	OriginType      pgtype.Text        `json:"origin_type"`
+	OriginID        pgtype.UUID        `json:"origin_id"`
+	EstimateMinutes pgtype.Int4        `json:"estimate_minutes"`
 }
 
 func (q *Queries) CreateIssueWithOrigin(ctx context.Context, arg CreateIssueWithOriginParams) (Issue, error) {
@@ -298,6 +341,7 @@ func (q *Queries) CreateIssueWithOrigin(ctx context.Context, arg CreateIssueWith
 		arg.ProjectID,
 		arg.OriginType,
 		arg.OriginID,
+		arg.EstimateMinutes,
 	)
 	var i Issue
 	err := row.Scan(
@@ -323,6 +367,7 @@ func (q *Queries) CreateIssueWithOrigin(ctx context.Context, arg CreateIssueWith
 		&i.OriginType,
 		&i.OriginID,
 		&i.FirstExecutedAt,
+		&i.EstimateMinutes,
 		&i.PrUrl,
 		&i.PrNumber,
 		&i.PrRepo,
@@ -341,7 +386,7 @@ func (q *Queries) DeleteIssue(ctx context.Context, id pgtype.UUID) error {
 }
 
 const getIssue = `-- name: GetIssue :one
-SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, pr_url, pr_number, pr_repo, phase_state FROM issue
+SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, estimate_minutes, pr_url, pr_number, pr_repo, phase_state FROM issue
 WHERE id = $1
 `
 
@@ -371,6 +416,7 @@ func (q *Queries) GetIssue(ctx context.Context, id pgtype.UUID) (Issue, error) {
 		&i.OriginType,
 		&i.OriginID,
 		&i.FirstExecutedAt,
+		&i.EstimateMinutes,
 		&i.PrUrl,
 		&i.PrNumber,
 		&i.PrRepo,
@@ -381,7 +427,7 @@ func (q *Queries) GetIssue(ctx context.Context, id pgtype.UUID) (Issue, error) {
 
 const getIssueByIdentifier = `-- name: GetIssueByIdentifier :one
 
-SELECT i.id, i.workspace_id, i.title, i.description, i.status, i.priority, i.assignee_type, i.assignee_id, i.creator_type, i.creator_id, i.parent_issue_id, i.acceptance_criteria, i.context_refs, i.position, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.origin_type, i.origin_id, i.first_executed_at, i.pr_url, i.pr_number, i.pr_repo, i.phase_state
+SELECT i.id, i.workspace_id, i.title, i.description, i.status, i.priority, i.assignee_type, i.assignee_id, i.creator_type, i.creator_id, i.parent_issue_id, i.acceptance_criteria, i.context_refs, i.position, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.origin_type, i.origin_id, i.first_executed_at, i.estimate_minutes, i.pr_url, i.pr_number, i.pr_repo, i.phase_state
 FROM issue i
 JOIN workspace w ON w.id = i.workspace_id
 WHERE i.workspace_id = $1
@@ -425,6 +471,7 @@ func (q *Queries) GetIssueByIdentifier(ctx context.Context, arg GetIssueByIdenti
 		&i.OriginType,
 		&i.OriginID,
 		&i.FirstExecutedAt,
+		&i.EstimateMinutes,
 		&i.PrUrl,
 		&i.PrNumber,
 		&i.PrRepo,
@@ -434,7 +481,7 @@ func (q *Queries) GetIssueByIdentifier(ctx context.Context, arg GetIssueByIdenti
 }
 
 const getIssueByNumber = `-- name: GetIssueByNumber :one
-SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, pr_url, pr_number, pr_repo, phase_state FROM issue
+SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, estimate_minutes, pr_url, pr_number, pr_repo, phase_state FROM issue
 WHERE workspace_id = $1 AND number = $2
 `
 
@@ -469,6 +516,7 @@ func (q *Queries) GetIssueByNumber(ctx context.Context, arg GetIssueByNumberPara
 		&i.OriginType,
 		&i.OriginID,
 		&i.FirstExecutedAt,
+		&i.EstimateMinutes,
 		&i.PrUrl,
 		&i.PrNumber,
 		&i.PrRepo,
@@ -478,7 +526,7 @@ func (q *Queries) GetIssueByNumber(ctx context.Context, arg GetIssueByNumberPara
 }
 
 const getIssueByPR = `-- name: GetIssueByPR :one
-SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, pr_url, pr_number, pr_repo, phase_state FROM issue
+SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, estimate_minutes, pr_url, pr_number, pr_repo, phase_state FROM issue
 WHERE pr_repo = $1 AND pr_number = $2
 LIMIT 1
 `
@@ -514,6 +562,7 @@ func (q *Queries) GetIssueByPR(ctx context.Context, arg GetIssueByPRParams) (Iss
 		&i.OriginType,
 		&i.OriginID,
 		&i.FirstExecutedAt,
+		&i.EstimateMinutes,
 		&i.PrUrl,
 		&i.PrNumber,
 		&i.PrRepo,
@@ -523,7 +572,7 @@ func (q *Queries) GetIssueByPR(ctx context.Context, arg GetIssueByPRParams) (Iss
 }
 
 const getIssueInWorkspace = `-- name: GetIssueInWorkspace :one
-SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, pr_url, pr_number, pr_repo, phase_state FROM issue
+SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, estimate_minutes, pr_url, pr_number, pr_repo, phase_state FROM issue
 WHERE id = $1 AND workspace_id = $2
 `
 
@@ -558,6 +607,7 @@ func (q *Queries) GetIssueInWorkspace(ctx context.Context, arg GetIssueInWorkspa
 		&i.OriginType,
 		&i.OriginID,
 		&i.FirstExecutedAt,
+		&i.EstimateMinutes,
 		&i.PrUrl,
 		&i.PrNumber,
 		&i.PrRepo,
@@ -567,7 +617,7 @@ func (q *Queries) GetIssueInWorkspace(ctx context.Context, arg GetIssueInWorkspa
 }
 
 const listChildIssues = `-- name: ListChildIssues :many
-SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, pr_url, pr_number, pr_repo, phase_state FROM issue
+SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, estimate_minutes, pr_url, pr_number, pr_repo, phase_state FROM issue
 WHERE parent_issue_id = $1
 ORDER BY position ASC, created_at DESC
 `
@@ -604,6 +654,7 @@ func (q *Queries) ListChildIssues(ctx context.Context, parentIssueID pgtype.UUID
 			&i.OriginType,
 			&i.OriginID,
 			&i.FirstExecutedAt,
+			&i.EstimateMinutes,
 			&i.PrUrl,
 			&i.PrNumber,
 			&i.PrRepo,
@@ -622,7 +673,8 @@ func (q *Queries) ListChildIssues(ctx context.Context, parentIssueID pgtype.UUID
 const listIssues = `-- name: ListIssues :many
 SELECT id, workspace_id, title, description, status, priority,
        assignee_type, assignee_id, creator_type, creator_id,
-       parent_issue_id, position, due_date, created_at, updated_at, number, project_id
+       parent_issue_id, position, due_date, created_at, updated_at, number, project_id,
+       estimate_minutes
 FROM issue
 WHERE workspace_id = $1
   AND ($4::text IS NULL OR status = $4)
@@ -648,23 +700,24 @@ type ListIssuesParams struct {
 }
 
 type ListIssuesRow struct {
-	ID            pgtype.UUID        `json:"id"`
-	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
-	Title         string             `json:"title"`
-	Description   pgtype.Text        `json:"description"`
-	Status        string             `json:"status"`
-	Priority      string             `json:"priority"`
-	AssigneeType  pgtype.Text        `json:"assignee_type"`
-	AssigneeID    pgtype.UUID        `json:"assignee_id"`
-	CreatorType   string             `json:"creator_type"`
-	CreatorID     pgtype.UUID        `json:"creator_id"`
-	ParentIssueID pgtype.UUID        `json:"parent_issue_id"`
-	Position      float64            `json:"position"`
-	DueDate       pgtype.Timestamptz `json:"due_date"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
-	Number        int32              `json:"number"`
-	ProjectID     pgtype.UUID        `json:"project_id"`
+	ID              pgtype.UUID        `json:"id"`
+	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
+	Title           string             `json:"title"`
+	Description     pgtype.Text        `json:"description"`
+	Status          string             `json:"status"`
+	Priority        string             `json:"priority"`
+	AssigneeType    pgtype.Text        `json:"assignee_type"`
+	AssigneeID      pgtype.UUID        `json:"assignee_id"`
+	CreatorType     string             `json:"creator_type"`
+	CreatorID       pgtype.UUID        `json:"creator_id"`
+	ParentIssueID   pgtype.UUID        `json:"parent_issue_id"`
+	Position        float64            `json:"position"`
+	DueDate         pgtype.Timestamptz `json:"due_date"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+	Number          int32              `json:"number"`
+	ProjectID       pgtype.UUID        `json:"project_id"`
+	EstimateMinutes pgtype.Int4        `json:"estimate_minutes"`
 }
 
 func (q *Queries) ListIssues(ctx context.Context, arg ListIssuesParams) ([]ListIssuesRow, error) {
@@ -704,6 +757,7 @@ func (q *Queries) ListIssues(ctx context.Context, arg ListIssuesParams) ([]ListI
 			&i.UpdatedAt,
 			&i.Number,
 			&i.ProjectID,
+			&i.EstimateMinutes,
 		); err != nil {
 			return nil, err
 		}
@@ -718,7 +772,8 @@ func (q *Queries) ListIssues(ctx context.Context, arg ListIssuesParams) ([]ListI
 const listOpenIssues = `-- name: ListOpenIssues :many
 SELECT id, workspace_id, title, description, status, priority,
        assignee_type, assignee_id, creator_type, creator_id,
-       parent_issue_id, position, due_date, created_at, updated_at, number, project_id
+       parent_issue_id, position, due_date, created_at, updated_at, number, project_id,
+       estimate_minutes
 FROM issue
 WHERE workspace_id = $1
   AND status NOT IN ('done', 'cancelled')
@@ -740,23 +795,24 @@ type ListOpenIssuesParams struct {
 }
 
 type ListOpenIssuesRow struct {
-	ID            pgtype.UUID        `json:"id"`
-	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
-	Title         string             `json:"title"`
-	Description   pgtype.Text        `json:"description"`
-	Status        string             `json:"status"`
-	Priority      string             `json:"priority"`
-	AssigneeType  pgtype.Text        `json:"assignee_type"`
-	AssigneeID    pgtype.UUID        `json:"assignee_id"`
-	CreatorType   string             `json:"creator_type"`
-	CreatorID     pgtype.UUID        `json:"creator_id"`
-	ParentIssueID pgtype.UUID        `json:"parent_issue_id"`
-	Position      float64            `json:"position"`
-	DueDate       pgtype.Timestamptz `json:"due_date"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
-	Number        int32              `json:"number"`
-	ProjectID     pgtype.UUID        `json:"project_id"`
+	ID              pgtype.UUID        `json:"id"`
+	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
+	Title           string             `json:"title"`
+	Description     pgtype.Text        `json:"description"`
+	Status          string             `json:"status"`
+	Priority        string             `json:"priority"`
+	AssigneeType    pgtype.Text        `json:"assignee_type"`
+	AssigneeID      pgtype.UUID        `json:"assignee_id"`
+	CreatorType     string             `json:"creator_type"`
+	CreatorID       pgtype.UUID        `json:"creator_id"`
+	ParentIssueID   pgtype.UUID        `json:"parent_issue_id"`
+	Position        float64            `json:"position"`
+	DueDate         pgtype.Timestamptz `json:"due_date"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+	Number          int32              `json:"number"`
+	ProjectID       pgtype.UUID        `json:"project_id"`
+	EstimateMinutes pgtype.Int4        `json:"estimate_minutes"`
 }
 
 func (q *Queries) ListOpenIssues(ctx context.Context, arg ListOpenIssuesParams) ([]ListOpenIssuesRow, error) {
@@ -793,6 +849,7 @@ func (q *Queries) ListOpenIssues(ctx context.Context, arg ListOpenIssuesParams) 
 			&i.UpdatedAt,
 			&i.Number,
 			&i.ProjectID,
+			&i.EstimateMinutes,
 		); err != nil {
 			return nil, err
 		}
@@ -845,7 +902,7 @@ UPDATE issue SET
     pr_repo    = $4,
     updated_at = now()
 WHERE id = $1
-RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, pr_url, pr_number, pr_repo, phase_state
+RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, estimate_minutes, pr_url, pr_number, pr_repo, phase_state
 `
 
 type SetIssuePRParams struct {
@@ -886,6 +943,7 @@ func (q *Queries) SetIssuePR(ctx context.Context, arg SetIssuePRParams) (Issue, 
 		&i.OriginType,
 		&i.OriginID,
 		&i.FirstExecutedAt,
+		&i.EstimateMinutes,
 		&i.PrUrl,
 		&i.PrNumber,
 		&i.PrRepo,
@@ -906,25 +964,27 @@ UPDATE issue SET
     due_date = $9,
     parent_issue_id = $10,
     project_id = $11,
-    phase_state = COALESCE($12::jsonb, phase_state),
+    estimate_minutes = $12,
+    phase_state = COALESCE($13::jsonb, phase_state),
     updated_at = now()
 WHERE id = $1
-RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, pr_url, pr_number, pr_repo, phase_state
+RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, estimate_minutes, pr_url, pr_number, pr_repo, phase_state
 `
 
 type UpdateIssueParams struct {
-	ID            pgtype.UUID        `json:"id"`
-	Title         pgtype.Text        `json:"title"`
-	Description   pgtype.Text        `json:"description"`
-	Status        pgtype.Text        `json:"status"`
-	Priority      pgtype.Text        `json:"priority"`
-	AssigneeType  pgtype.Text        `json:"assignee_type"`
-	AssigneeID    pgtype.UUID        `json:"assignee_id"`
-	Position      pgtype.Float8      `json:"position"`
-	DueDate       pgtype.Timestamptz `json:"due_date"`
-	ParentIssueID pgtype.UUID        `json:"parent_issue_id"`
-	ProjectID     pgtype.UUID        `json:"project_id"`
-	PhaseState    []byte             `json:"phase_state"`
+	ID              pgtype.UUID        `json:"id"`
+	Title           pgtype.Text        `json:"title"`
+	Description     pgtype.Text        `json:"description"`
+	Status          pgtype.Text        `json:"status"`
+	Priority        pgtype.Text        `json:"priority"`
+	AssigneeType    pgtype.Text        `json:"assignee_type"`
+	AssigneeID      pgtype.UUID        `json:"assignee_id"`
+	Position        pgtype.Float8      `json:"position"`
+	DueDate         pgtype.Timestamptz `json:"due_date"`
+	ParentIssueID   pgtype.UUID        `json:"parent_issue_id"`
+	ProjectID       pgtype.UUID        `json:"project_id"`
+	EstimateMinutes pgtype.Int4        `json:"estimate_minutes"`
+	PhaseState      []byte             `json:"phase_state"`
 }
 
 func (q *Queries) UpdateIssue(ctx context.Context, arg UpdateIssueParams) (Issue, error) {
@@ -940,6 +1000,7 @@ func (q *Queries) UpdateIssue(ctx context.Context, arg UpdateIssueParams) (Issue
 		arg.DueDate,
 		arg.ParentIssueID,
 		arg.ProjectID,
+		arg.EstimateMinutes,
 		arg.PhaseState,
 	)
 	var i Issue
@@ -966,6 +1027,7 @@ func (q *Queries) UpdateIssue(ctx context.Context, arg UpdateIssueParams) (Issue
 		&i.OriginType,
 		&i.OriginID,
 		&i.FirstExecutedAt,
+		&i.EstimateMinutes,
 		&i.PrUrl,
 		&i.PrNumber,
 		&i.PrRepo,
@@ -979,7 +1041,7 @@ UPDATE issue SET
     status = $2,
     updated_at = now()
 WHERE id = $1
-RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, pr_url, pr_number, pr_repo, phase_state
+RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, estimate_minutes, pr_url, pr_number, pr_repo, phase_state
 `
 
 type UpdateIssueStatusParams struct {
@@ -1013,6 +1075,7 @@ func (q *Queries) UpdateIssueStatus(ctx context.Context, arg UpdateIssueStatusPa
 		&i.OriginType,
 		&i.OriginID,
 		&i.FirstExecutedAt,
+		&i.EstimateMinutes,
 		&i.PrUrl,
 		&i.PrNumber,
 		&i.PrRepo,

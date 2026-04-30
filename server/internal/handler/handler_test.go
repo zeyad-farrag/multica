@@ -330,6 +330,180 @@ func TestIssueCRUD(t *testing.T) {
 	}
 }
 
+func TestUpdateIssueEstimateMinutes_RoundTrip(t *testing.T) {
+	created := createIssueForEstimateTest(t, "Estimate round trip", nil, nil, nil)
+	defer deleteIssuesForEstimateTest(t, created.ID)
+
+	w := httptest.NewRecorder()
+	req := newRequest("PUT", "/api/issues/"+created.ID, map[string]any{
+		"estimate_minutes": 60,
+	})
+	req = withURLParam(req, "id", created.ID)
+	testHandler.UpdateIssue(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("UpdateIssue set estimate_minutes: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	fetched := getIssueForEstimateTest(t, created.ID)
+	if fetched.EstimateMinutes == nil || *fetched.EstimateMinutes != 60 {
+		t.Fatalf("GetIssue: expected estimate_minutes 60, got %#v", fetched.EstimateMinutes)
+	}
+	if fetched.ComputedEstimateMinutes != 0 {
+		t.Fatalf("GetIssue: expected computed_estimate_minutes 0 for leaf, got %d", fetched.ComputedEstimateMinutes)
+	}
+
+	w = httptest.NewRecorder()
+	req = newRequest("PUT", "/api/issues/"+created.ID, map[string]any{
+		"estimate_minutes": nil,
+	})
+	req = withURLParam(req, "id", created.ID)
+	testHandler.UpdateIssue(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("UpdateIssue clear estimate_minutes: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	fetched = getIssueForEstimateTest(t, created.ID)
+	if fetched.EstimateMinutes != nil {
+		t.Fatalf("GetIssue: expected cleared estimate_minutes, got %#v", fetched.EstimateMinutes)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		value int
+	}{
+		{name: "zero", value: 0},
+		{name: "negative", value: -10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			req := newRequest("PUT", "/api/issues/"+created.ID, map[string]any{
+				"estimate_minutes": tc.value,
+			})
+			req = withURLParam(req, "id", created.ID)
+			testHandler.UpdateIssue(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("UpdateIssue estimate_minutes %d: expected 400, got %d: %s", tc.value, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestGetIssueComputedEstimateMinutes(t *testing.T) {
+	agentID := handlerTestAgentID(t)
+	memberType := "member"
+	agentType := "agent"
+
+	parent := createIssueForEstimateTest(t, "Estimate parent", nil, nil, nil)
+	memberChildA := createIssueForEstimateTest(t, "Estimate member child A", &parent.ID, &memberType, &testUserID)
+	memberChildB := createIssueForEstimateTest(t, "Estimate member child B", &parent.ID, &memberType, &testUserID)
+	agentChild := createIssueForEstimateTest(t, "Estimate agent child", &parent.ID, &agentType, &agentID)
+	defer deleteIssuesForEstimateTest(t, agentChild.ID, memberChildB.ID, memberChildA.ID, parent.ID)
+
+	updateIssueEstimateForTest(t, memberChildA.ID, 30)
+	updateIssueEstimateForTest(t, memberChildB.ID, 45)
+	updateIssueEstimateForTest(t, agentChild.ID, 999)
+
+	fetchedParent := getIssueForEstimateTest(t, parent.ID)
+	if fetchedParent.ComputedEstimateMinutes != 75 {
+		t.Fatalf("GetIssue parent: expected computed_estimate_minutes 75, got %d", fetchedParent.ComputedEstimateMinutes)
+	}
+
+	fetchedLeaf := getIssueForEstimateTest(t, memberChildA.ID)
+	if fetchedLeaf.ComputedEstimateMinutes != 0 {
+		t.Fatalf("GetIssue leaf: expected computed_estimate_minutes 0, got %d", fetchedLeaf.ComputedEstimateMinutes)
+	}
+}
+
+func createIssueForEstimateTest(t *testing.T, title string, parentID, assigneeType, assigneeID *string) IssueResponse {
+	t.Helper()
+
+	body := map[string]any{
+		"title":  title,
+		"status": "backlog",
+	}
+	if parentID != nil {
+		body["parent_issue_id"] = *parentID
+	}
+	if assigneeType != nil {
+		body["assignee_type"] = *assigneeType
+	}
+	if assigneeID != nil {
+		body["assignee_id"] = *assigneeID
+	}
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, body)
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue %q: expected 201, got %d: %s", title, w.Code, w.Body.String())
+	}
+
+	var created IssueResponse
+	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
+		t.Fatalf("CreateIssue %q: decode response: %v", title, err)
+	}
+	return created
+}
+
+func updateIssueEstimateForTest(t *testing.T, issueID string, minutes int) {
+	t.Helper()
+
+	w := httptest.NewRecorder()
+	req := newRequest("PUT", "/api/issues/"+issueID, map[string]any{
+		"estimate_minutes": minutes,
+	})
+	req = withURLParam(req, "id", issueID)
+	testHandler.UpdateIssue(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("UpdateIssue estimate_minutes for %s: expected 200, got %d: %s", issueID, w.Code, w.Body.String())
+	}
+}
+
+func getIssueForEstimateTest(t *testing.T, issueID string) IssueResponse {
+	t.Helper()
+
+	w := httptest.NewRecorder()
+	req := newRequest("GET", "/api/issues/"+issueID, nil)
+	req = withURLParam(req, "id", issueID)
+	testHandler.GetIssue(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GetIssue %s: expected 200, got %d: %s", issueID, w.Code, w.Body.String())
+	}
+
+	var fetched IssueResponse
+	if err := json.NewDecoder(w.Body).Decode(&fetched); err != nil {
+		t.Fatalf("GetIssue %s: decode response: %v", issueID, err)
+	}
+	return fetched
+}
+
+func deleteIssuesForEstimateTest(t *testing.T, issueIDs ...string) {
+	t.Helper()
+
+	for _, issueID := range issueIDs {
+		if issueID == "" {
+			continue
+		}
+		req := newRequest("DELETE", "/api/issues/"+issueID, nil)
+		req = withURLParam(req, "id", issueID)
+		testHandler.DeleteIssue(httptest.NewRecorder(), req)
+	}
+}
+
+func handlerTestAgentID(t *testing.T) string {
+	t.Helper()
+
+	var agentID string
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT id FROM agent WHERE workspace_id = $1 AND name = $2`,
+		testWorkspaceID,
+		"Handler Test Agent",
+	).Scan(&agentID); err != nil {
+		t.Fatalf("failed to find handler test agent: %v", err)
+	}
+	return agentID
+}
+
 // TestCreateIssueDefaultStatusIsTodo verifies that issues created without an
 // explicit status default to "todo" so the daemon picks them up immediately.
 // Before this fix the default was "backlog", which daemons ignore.
@@ -1038,7 +1212,7 @@ func TestSendCodeDbError(t *testing.T) {
 	// We can't easily mock the DB here without changing architecture,
 	// but we can simulate a DB error by closing the pool temporarily or
 	// using a cancelled context if the query respects it.
-	
+
 	// Create a handler with a "broken" queries object is hard because it's a struct.
 	// Instead, let's use a context that is already cancelled.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1053,13 +1227,13 @@ func TestSendCodeDbError(t *testing.T) {
 	req = req.WithContext(ctx)
 
 	testHandler.SendCode(w, req)
-	
+
 	// If the DB query respects the cancelled context, it should return an error.
 	// pgx usually returns context.Canceled which is not what isNotFound checks for.
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("SendCode (db error): expected 500, got %d: %s", w.Code, w.Body.String())
 	}
-	
+
 	var resp map[string]string
 	json.NewDecoder(w.Body).Decode(&resp)
 	if resp["error"] != "failed to lookup user" {
