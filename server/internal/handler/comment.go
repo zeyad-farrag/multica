@@ -218,8 +218,13 @@ func (h *Handler) ListCommentsForBackfill(w http.ResponseWriter, r *http.Request
 		cursorID = parsedID
 	}
 
+	workspace, err := h.Queries.GetWorkspace(ctx, wsUUID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load workspace")
+		return
+	}
 	loc := time.UTC
-	if workspace, err := h.Queries.GetWorkspace(ctx, wsUUID); err == nil && len(workspace.Settings) > 0 {
+	if len(workspace.Settings) > 0 {
 		var settings map[string]any
 		if json.Unmarshal(workspace.Settings, &settings) == nil {
 			if tz, ok := settings["timezone"].(string); ok && tz != "" {

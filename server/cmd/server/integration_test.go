@@ -237,21 +237,46 @@ func TestTeamAppReadEndpointsAuthAndShape(t *testing.T) {
 			id, workspace_id, title, status, priority, creator_type, creator_id,
 			position, number, created_at, updated_at
 		) VALUES ($1, $2, 'integration read issue', 'todo', 'none', 'member', $3, 9301, 9301, $4, $4)
-		ON CONFLICT (id) DO UPDATE SET updated_at = EXCLUDED.updated_at
+		ON CONFLICT (id) DO UPDATE SET
+			workspace_id = EXCLUDED.workspace_id,
+			title = EXCLUDED.title,
+			status = EXCLUDED.status,
+			priority = EXCLUDED.priority,
+			creator_type = EXCLUDED.creator_type,
+			creator_id = EXCLUDED.creator_id,
+			position = EXCLUDED.position,
+			number = EXCLUDED.number,
+			created_at = EXCLUDED.created_at,
+			updated_at = EXCLUDED.updated_at
 	`, issueID, testWorkspaceID, testUserID, ts); err != nil {
 		t.Fatalf("seed issue: %v", err)
 	}
 	if _, err := testPool.Exec(ctx, `
 		INSERT INTO comment (id, issue_id, workspace_id, author_type, author_id, content, type, created_at, updated_at)
 		VALUES ('00000000-0000-0000-0000-000000000063', $1, $2, 'member', $3, 'status changed', 'status_change', $4, $4)
-		ON CONFLICT (id) DO NOTHING
+		ON CONFLICT (id) DO UPDATE SET
+			issue_id = EXCLUDED.issue_id,
+			workspace_id = EXCLUDED.workspace_id,
+			author_type = EXCLUDED.author_type,
+			author_id = EXCLUDED.author_id,
+			content = EXCLUDED.content,
+			type = EXCLUDED.type,
+			created_at = EXCLUDED.created_at,
+			updated_at = EXCLUDED.updated_at
 	`, issueID, testWorkspaceID, authorID, ts); err != nil {
 		t.Fatalf("seed comment: %v", err)
 	}
 	if _, err := testPool.Exec(ctx, `
 		INSERT INTO activity_log (id, workspace_id, issue_id, actor_type, actor_id, action, details, created_at)
 		VALUES ('00000000-0000-0000-0000-000000000064', $1, $2, 'member', $3, 'gate_bypassed', '{}'::jsonb, $4)
-		ON CONFLICT (id) DO NOTHING
+		ON CONFLICT (id) DO UPDATE SET
+			workspace_id = EXCLUDED.workspace_id,
+			issue_id = EXCLUDED.issue_id,
+			actor_type = EXCLUDED.actor_type,
+			actor_id = EXCLUDED.actor_id,
+			action = EXCLUDED.action,
+			details = EXCLUDED.details,
+			created_at = EXCLUDED.created_at
 	`, testWorkspaceID, issueID, testUserID, ts); err != nil {
 		t.Fatalf("seed activity: %v", err)
 	}
@@ -314,6 +339,12 @@ func TestTeamAppReadEndpointsAuthAndShape(t *testing.T) {
 	forbidden.Body.Close()
 	if forbidden.StatusCode != http.StatusForbidden {
 		t.Fatalf("non-member PAT: expected 403, got %d", forbidden.StatusCode)
+	}
+
+	notFound := patRequest(t, pat, http.MethodGet, "/api/workspaces/00000000-0000-0000-0000-000000009999/issues?updated_since="+ts.Format(time.RFC3339))
+	notFound.Body.Close()
+	if notFound.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown workspace: expected 404, got %d", notFound.StatusCode)
 	}
 }
 

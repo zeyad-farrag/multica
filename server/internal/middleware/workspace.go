@@ -3,9 +3,11 @@ package middleware
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
@@ -198,12 +200,29 @@ func buildMiddleware(queries *db.Queries, resolve workspaceResolver, roles []str
 				return
 			}
 
+			if memberMissStatus == http.StatusForbidden {
+				if _, err := queries.GetWorkspace(r.Context(), util.ParseUUID(workspaceID)); err != nil {
+					if errors.Is(err, pgx.ErrNoRows) {
+						writeError(w, http.StatusNotFound, "workspace not found")
+						return
+					}
+					slog.Error("workspace middleware: failed to load workspace", "workspace_id", workspaceID, "error", err)
+					writeError(w, http.StatusInternalServerError, "internal error")
+					return
+				}
+			}
+
 			member, err := queries.GetMemberByUserAndWorkspace(r.Context(), db.GetMemberByUserAndWorkspaceParams{
 				UserID:      util.ParseUUID(userID),
 				WorkspaceID: util.ParseUUID(workspaceID),
 			})
 			if err != nil {
-				writeError(w, memberMissStatus, "workspace not found")
+				if errors.Is(err, pgx.ErrNoRows) {
+					writeError(w, memberMissStatus, "workspace not found")
+					return
+				}
+				slog.Error("workspace middleware: failed to load workspace member", "workspace_id", workspaceID, "user_id", userID, "error", err)
+				writeError(w, http.StatusInternalServerError, "internal error")
 				return
 			}
 

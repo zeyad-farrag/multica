@@ -37,6 +37,15 @@ func TestCreateWorkspace_RejectsReservedSlug(t *testing.T) {
 
 func TestGetWorkspacePassesThroughWorkWeekSettings(t *testing.T) {
 	ctx := context.Background()
+	var origSettings []byte
+	if err := testPool.QueryRow(ctx, `SELECT COALESCE(settings, '{}'::jsonb) FROM workspace WHERE id = $1`, testWorkspaceID).Scan(&origSettings); err != nil {
+		t.Fatalf("load settings: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := testPool.Exec(context.Background(), `UPDATE workspace SET settings = $1::jsonb WHERE id = $2`, origSettings, testWorkspaceID); err != nil {
+			t.Fatalf("restore settings: %v", err)
+		}
+	})
 	_, err := testPool.Exec(ctx, `
 		UPDATE workspace
 		SET settings = '{"timezone":"UTC","work_week":{"days":["mon","tue","wed","thu"],"hours_per_day":6}}'::jsonb

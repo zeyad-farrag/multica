@@ -15,6 +15,15 @@ func TestListCommentsForBackfillIncludesAgentRowsAndCursor(t *testing.T) {
 	authorID := "00000000-0000-0000-0000-000000000031"
 	ts := time.Date(2026, 4, 30, 8, 0, 0, 0, time.UTC)
 	seedUpdatedSinceIssue(t, issueID, "comments", 9201, ts)
+	var origSettings []byte
+	if err := testPool.QueryRow(ctx, `SELECT COALESCE(settings, '{}'::jsonb) FROM workspace WHERE id = $1`, testWorkspaceID).Scan(&origSettings); err != nil {
+		t.Fatalf("load workspace settings: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := testPool.Exec(context.Background(), `UPDATE workspace SET settings = $1::jsonb WHERE id = $2`, origSettings, testWorkspaceID); err != nil {
+			t.Fatalf("restore workspace settings: %v", err)
+		}
+	})
 	if _, err := testPool.Exec(ctx, `UPDATE workspace SET settings = '{"timezone":"UTC"}'::jsonb WHERE id = $1`, testWorkspaceID); err != nil {
 		t.Fatalf("set timezone: %v", err)
 	}
