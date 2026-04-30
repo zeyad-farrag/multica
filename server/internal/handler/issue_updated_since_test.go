@@ -26,7 +26,9 @@ func seedUpdatedSinceIssue(t *testing.T, id, title string, number int, updatedAt
 }
 
 func TestListIssuesUpdatedSinceCursorStrictAfter(t *testing.T) {
-	sameTS := time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC)
+	// Keep this in the future so leaked NOW()-stamped rows from unrelated tests
+	// cannot satisfy updated_since and perturb the total assertion.
+	sameTS := time.Date(2099, 4, 30, 10, 0, 0, 0, time.UTC)
 	oldTS := sameTS.Add(-time.Hour)
 	seedUpdatedSinceIssue(t, "00000000-0000-0000-0000-000000000011", "old", 9101, oldTS)
 	seedUpdatedSinceIssue(t, "00000000-0000-0000-0000-000000000012", "first", 9102, sameTS)
