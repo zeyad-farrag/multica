@@ -96,6 +96,24 @@ WHERE workspace_id = $1
   AND (sqlc.narg('creator_id')::uuid IS NULL OR creator_id = sqlc.narg('creator_id'))
   AND (sqlc.narg('project_id')::uuid IS NULL OR project_id = sqlc.narg('project_id'));
 
+-- SPEC: §6.1 #3 — M-PR#3 read portion (Story 1.4).
+-- name: ListIssuesUpdatedSince :many
+SELECT id, workspace_id, title, description, status, priority,
+       assignee_type, assignee_id, creator_type, creator_id,
+       parent_issue_id, position, due_date, created_at, updated_at, number, project_id
+FROM issue
+WHERE workspace_id = $1
+  AND updated_at >= $2
+  AND (sqlc.narg('cursor_ts')::timestamptz IS NULL OR (updated_at, id) > (sqlc.narg('cursor_ts')::timestamptz, sqlc.narg('cursor_id')::uuid))
+ORDER BY updated_at ASC, id ASC
+LIMIT $3;
+
+-- SPEC: §6.1 #3 — M-PR#3 read portion (Story 1.4).
+-- name: CountIssuesUpdatedSince :one
+SELECT count(*) FROM issue
+WHERE workspace_id = $1
+  AND updated_at >= $2;
+
 -- name: ListChildIssues :many
 SELECT * FROM issue
 WHERE parent_issue_id = $1

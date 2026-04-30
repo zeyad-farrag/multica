@@ -173,6 +173,25 @@ func (q *Queries) CountIssues(ctx context.Context, arg CountIssuesParams) (int64
 	return count, err
 }
 
+const countIssuesUpdatedSince = `-- name: CountIssuesUpdatedSince :one
+SELECT count(*) FROM issue
+WHERE workspace_id = $1
+  AND updated_at >= $2
+`
+
+type CountIssuesUpdatedSinceParams struct {
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+// SPEC: §6.1 #3 — M-PR#3 read portion (Story 1.4).
+func (q *Queries) CountIssuesUpdatedSince(ctx context.Context, arg CountIssuesUpdatedSinceParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countIssuesUpdatedSince, arg.WorkspaceID, arg.UpdatedAt)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createIssue = `-- name: CreateIssue :one
 INSERT INTO issue (
     workspace_id, title, description, status, priority,
@@ -686,6 +705,91 @@ func (q *Queries) ListIssues(ctx context.Context, arg ListIssuesParams) ([]ListI
 	items := []ListIssuesRow{}
 	for rows.Next() {
 		var i ListIssuesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.Title,
+			&i.Description,
+			&i.Status,
+			&i.Priority,
+			&i.AssigneeType,
+			&i.AssigneeID,
+			&i.CreatorType,
+			&i.CreatorID,
+			&i.ParentIssueID,
+			&i.Position,
+			&i.DueDate,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Number,
+			&i.ProjectID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listIssuesUpdatedSince = `-- name: ListIssuesUpdatedSince :many
+SELECT id, workspace_id, title, description, status, priority,
+       assignee_type, assignee_id, creator_type, creator_id,
+       parent_issue_id, position, due_date, created_at, updated_at, number, project_id
+FROM issue
+WHERE workspace_id = $1
+  AND updated_at >= $2
+  AND ($4::timestamptz IS NULL OR (updated_at, id) > ($4::timestamptz, $5::uuid))
+ORDER BY updated_at ASC, id ASC
+LIMIT $3
+`
+
+type ListIssuesUpdatedSinceParams struct {
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	Limit       int32              `json:"limit"`
+	CursorTs    pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID    pgtype.UUID        `json:"cursor_id"`
+}
+
+type ListIssuesUpdatedSinceRow struct {
+	ID            pgtype.UUID        `json:"id"`
+	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
+	Title         string             `json:"title"`
+	Description   pgtype.Text        `json:"description"`
+	Status        string             `json:"status"`
+	Priority      string             `json:"priority"`
+	AssigneeType  pgtype.Text        `json:"assignee_type"`
+	AssigneeID    pgtype.UUID        `json:"assignee_id"`
+	CreatorType   string             `json:"creator_type"`
+	CreatorID     pgtype.UUID        `json:"creator_id"`
+	ParentIssueID pgtype.UUID        `json:"parent_issue_id"`
+	Position      float64            `json:"position"`
+	DueDate       pgtype.Timestamptz `json:"due_date"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	Number        int32              `json:"number"`
+	ProjectID     pgtype.UUID        `json:"project_id"`
+}
+
+// SPEC: §6.1 #3 — M-PR#3 read portion (Story 1.4).
+func (q *Queries) ListIssuesUpdatedSince(ctx context.Context, arg ListIssuesUpdatedSinceParams) ([]ListIssuesUpdatedSinceRow, error) {
+	rows, err := q.db.Query(ctx, listIssuesUpdatedSince,
+		arg.WorkspaceID,
+		arg.UpdatedAt,
+		arg.Limit,
+		arg.CursorTs,
+		arg.CursorID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListIssuesUpdatedSinceRow{}
+	for rows.Next() {
+		var i ListIssuesUpdatedSinceRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.WorkspaceID,

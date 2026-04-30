@@ -167,6 +167,118 @@ func (h *Handler) ListComments(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// SPEC: §6.1 #6 — M-PR#3 read portion (Story 1.4).
+// Workspace timezone is read from workspace.settings.timezone; missing or invalid values fall back to UTC.
+// NOTE: Returns agent-authored comments too. Per spec §14 + epic 1.4 AC, the standalone app filters by author_type='member' on its side. Do not add author_type='member' here.
+func (h *Handler) ListCommentsForBackfill(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	workspaceID := chi.URLParam(r, "id")
+	wsUUID, ok := parseRequiredUUID(workspaceID)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid workspace id")
+		return
+	}
+
+	q := r.URL.Query()
+	authorID, ok := parseRequiredUUID(q.Get("author_id"))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "author_id is required")
+		return
+	}
+	commentType := q.Get("type")
+	if commentType == "" {
+		writeError(w, http.StatusBadRequest, "type is required")
+		return
+	}
+	dateRaw := q.Get("date")
+	if dateRaw == "" {
+		writeError(w, http.StatusBadRequest, "date is required")
+		return
+	}
+	day, err := time.Parse("2006-01-02", dateRaw)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid date")
+		return
+	}
+	limit, ok := parseLimit(r, 200, 1000)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_limit")
+		return
+	}
+
+	var cursorTS pgtype.Timestamptz
+	var cursorID pgtype.UUID
+	if raw := q.Get("cursor"); raw != "" {
+		cursorTime, parsedID, err := parseCursor(raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_cursor")
+			return
+		}
+		cursorTS = cursorTimestamptz(cursorTime)
+		cursorID = parsedID
+	}
+
+	loc := time.UTC
+	if workspace, err := h.Queries.GetWorkspace(ctx, wsUUID); err == nil && len(workspace.Settings) > 0 {
+		var settings map[string]any
+		if json.Unmarshal(workspace.Settings, &settings) == nil {
+			if tz, ok := settings["timezone"].(string); ok && tz != "" {
+				if loaded, err := time.LoadLocation(tz); err == nil {
+					loc = loaded
+				}
+			}
+		}
+	}
+	start := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, loc).UTC()
+	end := start.In(loc).AddDate(0, 0, 1).UTC()
+
+	rows, err := h.Queries.ListCommentsByAuthorTypeDate(ctx, db.ListCommentsByAuthorTypeDateParams{
+		WorkspaceID: wsUUID,
+		AuthorID:    authorID,
+		Type:        commentType,
+		CreatedAt:   pgtype.Timestamptz{Time: start, Valid: true},
+		CreatedAt_2: pgtype.Timestamptz{Time: end, Valid: true},
+		Limit:       limit + 1,
+		CursorTs:    cursorTS,
+		CursorID:    cursorID,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list comments")
+		return
+	}
+	hasMore := len(rows) > int(limit)
+	if hasMore {
+		rows = rows[:int(limit)]
+	}
+
+	total, err := h.Queries.CountCommentsByAuthorTypeDate(ctx, db.CountCommentsByAuthorTypeDateParams{
+		WorkspaceID: wsUUID,
+		AuthorID:    authorID,
+		Type:        commentType,
+		CreatedAt:   pgtype.Timestamptz{Time: start, Valid: true},
+		CreatedAt_2: pgtype.Timestamptz{Time: end, Valid: true},
+	})
+	if err != nil {
+		total = int64(len(rows))
+	}
+
+	resp := make([]CommentResponse, len(rows))
+	for i, c := range rows {
+		resp[i] = commentToResponse(c, nil, nil)
+	}
+	var nextCursor *string
+	if hasMore && len(rows) > 0 {
+		last := rows[len(rows)-1]
+		cursor := encodeCursor(last.CreatedAt.Time, last.ID)
+		nextCursor = &cursor
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"comments":    resp,
+		"next_cursor": nextCursor,
+		"total":       total,
+	})
+}
+
 type CreateCommentRequest struct {
 	Content       string   `json:"content"`
 	Type          string   `json:"type"`

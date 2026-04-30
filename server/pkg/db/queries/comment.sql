@@ -24,6 +24,27 @@ LIMIT $4 OFFSET $5;
 SELECT count(*) FROM comment
 WHERE issue_id = $1 AND workspace_id = $2;
 
+-- SPEC: §6.1 #6 — M-PR#3 read portion (Story 1.4).
+-- name: ListCommentsByAuthorTypeDate :many
+SELECT * FROM comment
+WHERE workspace_id = $1
+  AND author_id = $2
+  AND type = $3
+  AND created_at >= $4
+  AND created_at < $5
+  AND (sqlc.narg('cursor_ts')::timestamptz IS NULL OR (created_at, id) > (sqlc.narg('cursor_ts')::timestamptz, sqlc.narg('cursor_id')::uuid))
+ORDER BY created_at ASC, id ASC
+LIMIT $6;
+
+-- SPEC: §6.1 #6 — M-PR#3 read portion (Story 1.4).
+-- name: CountCommentsByAuthorTypeDate :one
+SELECT count(*) FROM comment
+WHERE workspace_id = $1
+  AND author_id = $2
+  AND type = $3
+  AND created_at >= $4
+  AND created_at < $5;
+
 -- name: GetComment :one
 SELECT * FROM comment
 WHERE id = $1;

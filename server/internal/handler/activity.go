@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -31,6 +32,34 @@ type TimelineEntry struct {
 	CommentType *string              `json:"comment_type,omitempty"`
 	Reactions   []ReactionResponse   `json:"reactions,omitempty"`
 	Attachments []AttachmentResponse `json:"attachments,omitempty"`
+}
+
+type WorkspaceActivityResponse struct {
+	ID          string          `json:"id"`
+	WorkspaceID string          `json:"workspace_id"`
+	IssueID     *string         `json:"issue_id"`
+	ActorType   string          `json:"actor_type"`
+	ActorID     string          `json:"actor_id"`
+	Action      string          `json:"action"`
+	Details     json.RawMessage `json:"details"`
+	CreatedAt   string          `json:"created_at"`
+}
+
+func activityToWorkspaceResponse(a db.ActivityLog) WorkspaceActivityResponse {
+	actorType := ""
+	if a.ActorType.Valid {
+		actorType = a.ActorType.String
+	}
+	return WorkspaceActivityResponse{
+		ID:          uuidToString(a.ID),
+		WorkspaceID: uuidToString(a.WorkspaceID),
+		IssueID:     uuidToPtr(a.IssueID),
+		ActorType:   actorType,
+		ActorID:     uuidToString(a.ActorID),
+		Action:      a.Action,
+		Details:     a.Details,
+		CreatedAt:   timestampToString(a.CreatedAt),
+	}
 }
 
 // ListTimeline returns a merged, chronologically-sorted timeline of activities
@@ -114,6 +143,103 @@ func (h *Handler) ListTimeline(w http.ResponseWriter, r *http.Request) {
 	})
 
 	writeJSON(w, http.StatusOK, timeline)
+}
+
+// SPEC: §6.1 #5 — M-PR#3 read portion (Story 1.4).
+func (h *Handler) ListWorkspaceActivity(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	workspaceID := chi.URLParam(r, "id")
+	wsUUID, ok := parseRequiredUUID(workspaceID)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid workspace id")
+		return
+	}
+
+	q := r.URL.Query()
+	sinceRaw := q.Get("since")
+	if sinceRaw == "" {
+		writeError(w, http.StatusBadRequest, "since is required")
+		return
+	}
+	since, err := time.Parse(time.RFC3339, sinceRaw)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid since")
+		return
+	}
+	limit, ok := parseLimit(r, 200, 1000)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_limit")
+		return
+	}
+
+	var action pgtype.Text
+	if raw := q.Get("action"); raw != "" {
+		action = pgtype.Text{String: raw, Valid: true}
+	}
+	var actorID pgtype.UUID
+	if raw := q.Get("actor_id"); raw != "" {
+		var parsed bool
+		actorID, parsed = parseRequiredUUID(raw)
+		if !parsed {
+			writeError(w, http.StatusBadRequest, "invalid actor_id")
+			return
+		}
+	}
+	var cursorTS pgtype.Timestamptz
+	var cursorID pgtype.UUID
+	if raw := q.Get("cursor"); raw != "" {
+		cursorTime, parsedID, err := parseCursor(raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_cursor")
+			return
+		}
+		cursorTS = cursorTimestamptz(cursorTime)
+		cursorID = parsedID
+	}
+
+	rows, err := h.Queries.ListActivityByWorkspace(ctx, db.ListActivityByWorkspaceParams{
+		WorkspaceID: wsUUID,
+		CreatedAt:   pgtype.Timestamptz{Time: since, Valid: true},
+		Limit:       limit + 1,
+		Action:      action,
+		ActorID:     actorID,
+		CursorTs:    cursorTS,
+		CursorID:    cursorID,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list activity")
+		return
+	}
+	hasMore := len(rows) > int(limit)
+	if hasMore {
+		rows = rows[:int(limit)]
+	}
+
+	total, err := h.Queries.CountActivityByWorkspace(ctx, db.CountActivityByWorkspaceParams{
+		WorkspaceID: wsUUID,
+		CreatedAt:   pgtype.Timestamptz{Time: since, Valid: true},
+		Action:      action,
+		ActorID:     actorID,
+	})
+	if err != nil {
+		total = int64(len(rows))
+	}
+
+	resp := make([]WorkspaceActivityResponse, len(rows))
+	for i, row := range rows {
+		resp[i] = activityToWorkspaceResponse(row)
+	}
+	var nextCursor *string
+	if hasMore && len(rows) > 0 {
+		last := rows[len(rows)-1]
+		cursor := encodeCursor(last.CreatedAt.Time, last.ID)
+		nextCursor = &cursor
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"activity":    resp,
+		"next_cursor": nextCursor,
+		"total":       total,
+	})
 }
 
 // AssigneeFrequencyEntry represents how often a user assigns to a specific target.

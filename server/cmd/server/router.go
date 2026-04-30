@@ -17,8 +17,8 @@ import (
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/events"
-	ghintegration "github.com/multica-ai/multica/server/internal/integrations/github"
 	"github.com/multica-ai/multica/server/internal/handler"
+	ghintegration "github.com/multica-ai/multica/server/internal/integrations/github"
 	"github.com/multica-ai/multica/server/internal/middleware"
 	"github.com/multica-ai/multica/server/internal/realtime"
 	"github.com/multica-ai/multica/server/internal/service"
@@ -240,6 +240,9 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analytics
 				r.Group(func(r chi.Router) {
 					r.Use(middleware.RequireWorkspaceMemberFromURL(queries, "id"))
 					r.Get("/", h.GetWorkspace)
+					r.Get("/issues", h.ListIssuesUpdatedSinceForWorkspace)
+					r.Get("/comments", h.ListCommentsForBackfill)
+					r.Get("/activity", h.ListWorkspaceActivity)
 					r.Get("/members", h.ListMembersWithUser)
 					r.Post("/leave", h.LeaveWorkspace)
 					r.Get("/invitations", h.ListWorkspaceInvitations)
@@ -525,4 +528,3 @@ func splitAndTrim(s string) []string {
 	}
 	return res
 }
-

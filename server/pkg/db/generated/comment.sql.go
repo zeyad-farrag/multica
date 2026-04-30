@@ -28,6 +28,37 @@ func (q *Queries) CountComments(ctx context.Context, arg CountCommentsParams) (i
 	return count, err
 }
 
+const countCommentsByAuthorTypeDate = `-- name: CountCommentsByAuthorTypeDate :one
+SELECT count(*) FROM comment
+WHERE workspace_id = $1
+  AND author_id = $2
+  AND type = $3
+  AND created_at >= $4
+  AND created_at < $5
+`
+
+type CountCommentsByAuthorTypeDateParams struct {
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	AuthorID    pgtype.UUID        `json:"author_id"`
+	Type        string             `json:"type"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	CreatedAt_2 pgtype.Timestamptz `json:"created_at_2"`
+}
+
+// SPEC: §6.1 #6 — M-PR#3 read portion (Story 1.4).
+func (q *Queries) CountCommentsByAuthorTypeDate(ctx context.Context, arg CountCommentsByAuthorTypeDateParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countCommentsByAuthorTypeDate,
+		arg.WorkspaceID,
+		arg.AuthorID,
+		arg.Type,
+		arg.CreatedAt,
+		arg.CreatedAt_2,
+	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createComment = `-- name: CreateComment :one
 INSERT INTO comment (issue_id, workspace_id, author_type, author_id, content, type, parent_id)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -186,6 +217,70 @@ type ListCommentsParams struct {
 
 func (q *Queries) ListComments(ctx context.Context, arg ListCommentsParams) ([]Comment, error) {
 	rows, err := q.db.Query(ctx, listComments, arg.IssueID, arg.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Comment{}
+	for rows.Next() {
+		var i Comment
+		if err := rows.Scan(
+			&i.ID,
+			&i.IssueID,
+			&i.AuthorType,
+			&i.AuthorID,
+			&i.Content,
+			&i.Type,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ParentID,
+			&i.WorkspaceID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCommentsByAuthorTypeDate = `-- name: ListCommentsByAuthorTypeDate :many
+SELECT id, issue_id, author_type, author_id, content, type, created_at, updated_at, parent_id, workspace_id FROM comment
+WHERE workspace_id = $1
+  AND author_id = $2
+  AND type = $3
+  AND created_at >= $4
+  AND created_at < $5
+  AND ($7::timestamptz IS NULL OR (created_at, id) > ($7::timestamptz, $8::uuid))
+ORDER BY created_at ASC, id ASC
+LIMIT $6
+`
+
+type ListCommentsByAuthorTypeDateParams struct {
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	AuthorID    pgtype.UUID        `json:"author_id"`
+	Type        string             `json:"type"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	CreatedAt_2 pgtype.Timestamptz `json:"created_at_2"`
+	Limit       int32              `json:"limit"`
+	CursorTs    pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID    pgtype.UUID        `json:"cursor_id"`
+}
+
+// SPEC: §6.1 #6 — M-PR#3 read portion (Story 1.4).
+func (q *Queries) ListCommentsByAuthorTypeDate(ctx context.Context, arg ListCommentsByAuthorTypeDateParams) ([]Comment, error) {
+	rows, err := q.db.Query(ctx, listCommentsByAuthorTypeDate,
+		arg.WorkspaceID,
+		arg.AuthorID,
+		arg.Type,
+		arg.CreatedAt,
+		arg.CreatedAt_2,
+		arg.Limit,
+		arg.CursorTs,
+		arg.CursorID,
+	)
 	if err != nil {
 		return nil, err
 	}
