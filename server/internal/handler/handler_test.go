@@ -248,8 +248,8 @@ func TestIssueCRUD(t *testing.T) {
 	if created.Title != "Test issue from Go test" {
 		t.Fatalf("CreateIssue: expected title 'Test issue from Go test', got '%s'", created.Title)
 	}
-	if created.Status != "todo" {
-		t.Fatalf("CreateIssue: expected status 'todo', got '%s'", created.Status)
+	if created.Status != "backlog" {
+		t.Fatalf("CreateIssue: expected status 'backlog', got '%s'", created.Status)
 	}
 	issueID := created.ID
 
@@ -270,7 +270,7 @@ func TestIssueCRUD(t *testing.T) {
 
 	// Update - partial (only status)
 	w = httptest.NewRecorder()
-	status := "in_progress"
+	status := "todo"
 	req = newRequest("PUT", "/api/issues/"+issueID, map[string]any{
 		"status": status,
 	})
@@ -282,8 +282,8 @@ func TestIssueCRUD(t *testing.T) {
 
 	var updated IssueResponse
 	json.NewDecoder(w.Body).Decode(&updated)
-	if updated.Status != "in_progress" {
-		t.Fatalf("UpdateIssue: expected status 'in_progress', got '%s'", updated.Status)
+	if updated.Status != "todo" {
+		t.Fatalf("UpdateIssue: expected status 'todo', got '%s'", updated.Status)
 	}
 	if updated.Title != "Test issue from Go test" {
 		t.Fatalf("UpdateIssue: title should be preserved, got '%s'", updated.Title)
@@ -326,10 +326,9 @@ func TestIssueCRUD(t *testing.T) {
 	}
 }
 
-// TestCreateIssueDefaultStatusIsTodo verifies that issues created without an
-// explicit status default to "todo" so the daemon picks them up immediately.
-// Before this fix the default was "backlog", which daemons ignore.
-func TestCreateIssueDefaultStatusIsTodo(t *testing.T) {
+// TestCreateIssueDefaultStatusIsBacklog verifies that issue creation always
+// lands in "backlog" when no explicit status is supplied.
+func TestCreateIssueDefaultStatusIsBacklog(t *testing.T) {
 	w := httptest.NewRecorder()
 	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
 		"title": "Issue with no explicit status",
@@ -341,8 +340,8 @@ func TestCreateIssueDefaultStatusIsTodo(t *testing.T) {
 
 	var created IssueResponse
 	json.NewDecoder(w.Body).Decode(&created)
-	if created.Status != "todo" {
-		t.Fatalf("CreateIssue: expected default status 'todo', got '%s'", created.Status)
+	if created.Status != "backlog" {
+		t.Fatalf("CreateIssue: expected default status 'backlog', got '%s'", created.Status)
 	}
 
 	// Cleanup
@@ -352,7 +351,7 @@ func TestCreateIssueDefaultStatusIsTodo(t *testing.T) {
 }
 
 // TestCreateIssueExplicitBacklogPreserved verifies that explicitly requesting
-// "backlog" status is still respected — only the implicit default changed.
+// "backlog" remains a no-op under the create-issue status lockdown.
 func TestCreateIssueExplicitBacklogPreserved(t *testing.T) {
 	w := httptest.NewRecorder()
 	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
