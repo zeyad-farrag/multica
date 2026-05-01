@@ -276,6 +276,7 @@ type Issue struct {
 	OriginType         pgtype.Text        `json:"origin_type"`
 	OriginID           pgtype.UUID        `json:"origin_id"`
 	FirstExecutedAt    pgtype.Timestamptz `json:"first_executed_at"`
+	EstimateMinutes    pgtype.Int4        `json:"estimate_minutes"`
 	PrUrl              pgtype.Text        `json:"pr_url"`
 	PrNumber           pgtype.Int4        `json:"pr_number"`
 	PrRepo             pgtype.Text        `json:"pr_repo"`

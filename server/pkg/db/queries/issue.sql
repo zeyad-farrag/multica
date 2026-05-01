@@ -1,7 +1,8 @@
 -- name: ListIssues :many
 SELECT id, workspace_id, title, description, status, priority,
        assignee_type, assignee_id, creator_type, creator_id,
-       parent_issue_id, position, due_date, created_at, updated_at, number, project_id
+       parent_issue_id, position, due_date, created_at, updated_at, number, project_id,
+       estimate_minutes
 FROM issue
 WHERE workspace_id = $1
   AND (sqlc.narg('status')::text IS NULL OR status = sqlc.narg('status'))
@@ -25,9 +26,11 @@ WHERE id = $1 AND workspace_id = $2;
 INSERT INTO issue (
     workspace_id, title, description, status, priority,
     assignee_type, assignee_id, creator_type, creator_id,
-    parent_issue_id, position, due_date, number, project_id
+    parent_issue_id, position, due_date, number, project_id,
+    estimate_minutes
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+    sqlc.narg('estimate_minutes')
 ) RETURNING *;
 
 -- name: GetIssueByNumber :one
@@ -46,6 +49,7 @@ UPDATE issue SET
     due_date = sqlc.narg('due_date'),
     parent_issue_id = sqlc.narg('parent_issue_id'),
     project_id = sqlc.narg('project_id'),
+    estimate_minutes = sqlc.narg('estimate_minutes'),
     phase_state = COALESCE(sqlc.narg('phase_state')::jsonb, phase_state),
     updated_at = now()
 WHERE id = $1
@@ -63,10 +67,10 @@ INSERT INTO issue (
     workspace_id, title, description, status, priority,
     assignee_type, assignee_id, creator_type, creator_id,
     parent_issue_id, position, due_date, number, project_id,
-    origin_type, origin_id
+    estimate_minutes, origin_type, origin_id
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-    sqlc.narg('origin_type'), sqlc.narg('origin_id')
+    sqlc.narg('estimate_minutes'), sqlc.narg('origin_type'), sqlc.narg('origin_id')
 ) RETURNING *;
 
 -- name: DeleteIssue :exec
@@ -75,7 +79,8 @@ DELETE FROM issue WHERE id = $1;
 -- name: ListOpenIssues :many
 SELECT id, workspace_id, title, description, status, priority,
        assignee_type, assignee_id, creator_type, creator_id,
-       parent_issue_id, position, due_date, created_at, updated_at, number, project_id
+       parent_issue_id, position, due_date, created_at, updated_at, number, project_id,
+       estimate_minutes
 FROM issue
 WHERE workspace_id = $1
   AND status NOT IN ('done', 'cancelled')
@@ -100,6 +105,28 @@ WHERE workspace_id = $1
 SELECT * FROM issue
 WHERE parent_issue_id = $1
 ORDER BY position ASC, created_at DESC;
+
+-- name: ComputeIssueEstimateRollup :one
+WITH RECURSIVE descendants AS (
+    SELECT i.id, i.parent_issue_id, i.assignee_type, i.estimate_minutes
+    FROM issue i
+    WHERE i.parent_issue_id = sqlc.arg('issue_id')
+      AND i.workspace_id = sqlc.arg('workspace_id')
+    UNION ALL
+    SELECT child.id, child.parent_issue_id, child.assignee_type, child.estimate_minutes
+    FROM issue child
+    JOIN descendants d ON child.parent_issue_id = d.id
+    WHERE child.workspace_id = sqlc.arg('workspace_id')
+)
+SELECT COALESCE(SUM(d.estimate_minutes), 0)::int
+FROM descendants d
+WHERE d.estimate_minutes IS NOT NULL
+  AND (d.assignee_type IS NULL OR d.assignee_type = 'member')
+  AND NOT EXISTS (
+      SELECT 1
+      FROM descendants c
+      WHERE c.parent_issue_id = d.id
+  );
 
 -- name: CountCreatedIssueAssignees :many
 -- Count assignees on issues created by a specific user.
