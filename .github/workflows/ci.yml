@@ -68,6 +68,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Verify team-app integration event contract
+        run: bash scripts/check_team_app_events.sh
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
