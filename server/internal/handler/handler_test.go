@@ -330,6 +330,183 @@ func TestIssueCRUD(t *testing.T) {
 	}
 }
 
+func TestUpdateIssueEstimateMinutes_RoundTrip(t *testing.T) {
+	ctx := context.Background()
+
+	var agentID string
+	if err := testPool.QueryRow(ctx,
+		`SELECT id FROM agent WHERE workspace_id = $1 ORDER BY created_at ASC LIMIT 1`,
+		testWorkspaceID,
+	).Scan(&agentID); err != nil {
+		t.Fatalf("failed to find test agent: %v", err)
+	}
+
+	createdIDs := make([]string, 0, 6)
+	createIssue := func(body map[string]any) IssueResponse {
+		t.Helper()
+
+		w := httptest.NewRecorder()
+		req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, body)
+		testHandler.CreateIssue(w, req)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
+		}
+
+		var created IssueResponse
+		if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
+			t.Fatalf("CreateIssue: failed to decode response: %v", err)
+		}
+		createdIDs = append(createdIDs, created.ID)
+		return created
+	}
+	updateIssue := func(issueID string, body any) *httptest.ResponseRecorder {
+		t.Helper()
+
+		w := httptest.NewRecorder()
+		req := newRequest("PUT", "/api/issues/"+issueID, body)
+		req = withURLParam(req, "id", issueID)
+		testHandler.UpdateIssue(w, req)
+		return w
+	}
+	getIssue := func(issueID string) IssueResponse {
+		t.Helper()
+
+		w := httptest.NewRecorder()
+		req := newRequest("GET", "/api/issues/"+issueID, nil)
+		req = withURLParam(req, "id", issueID)
+		testHandler.GetIssue(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GetIssue: expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+
+		var issue IssueResponse
+		if err := json.NewDecoder(w.Body).Decode(&issue); err != nil {
+			t.Fatalf("GetIssue: failed to decode response: %v", err)
+		}
+		return issue
+	}
+	setEstimate := func(issueID string, estimate int) {
+		t.Helper()
+
+		w := updateIssue(issueID, map[string]any{"estimate_minutes": estimate})
+		if w.Code != http.StatusOK {
+			t.Fatalf("UpdateIssue: expected 200 for estimate %d, got %d: %s", estimate, w.Code, w.Body.String())
+		}
+	}
+
+	defer func() {
+		for i := len(createdIDs) - 1; i >= 0; i-- {
+			req := newRequest("DELETE", "/api/issues/"+createdIDs[i], nil)
+			req = withURLParam(req, "id", createdIDs[i])
+			testHandler.DeleteIssue(httptest.NewRecorder(), req)
+		}
+	}()
+
+	issue := createIssue(map[string]any{
+		"title": "Estimate round-trip issue",
+	})
+
+	w := updateIssue(issue.ID, map[string]any{"estimate_minutes": 60})
+	if w.Code != http.StatusOK {
+		t.Fatalf("UpdateIssue: expected 200 when setting estimate, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var updated IssueResponse
+	if err := json.NewDecoder(w.Body).Decode(&updated); err != nil {
+		t.Fatalf("UpdateIssue: failed to decode response: %v", err)
+	}
+	if updated.EstimateMinutes == nil || *updated.EstimateMinutes != 60 {
+		t.Fatalf("UpdateIssue: expected estimate_minutes 60, got %v", updated.EstimateMinutes)
+	}
+
+	fetched := getIssue(issue.ID)
+	if fetched.EstimateMinutes == nil || *fetched.EstimateMinutes != 60 {
+		t.Fatalf("GetIssue: expected estimate_minutes 60, got %v", fetched.EstimateMinutes)
+	}
+
+	w = updateIssue(issue.ID, map[string]any{"estimate_minutes": nil})
+	if w.Code != http.StatusOK {
+		t.Fatalf("UpdateIssue: expected 200 when clearing estimate, got %d: %s", w.Code, w.Body.String())
+	}
+
+	fetched = getIssue(issue.ID)
+	if fetched.EstimateMinutes != nil {
+		t.Fatalf("GetIssue: expected cleared estimate_minutes, got %v", *fetched.EstimateMinutes)
+	}
+
+	w = updateIssue(issue.ID, map[string]any{"estimate_minutes": 0})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("UpdateIssue: expected 400 for zero estimate, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "estimate_minutes must be > 0") {
+		t.Fatalf("UpdateIssue: expected clear zero-estimate message, got %q", w.Body.String())
+	}
+
+	w = updateIssue(issue.ID, map[string]any{"estimate_minutes": -10})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("UpdateIssue: expected 400 for negative estimate, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "estimate_minutes must be > 0") {
+		t.Fatalf("UpdateIssue: expected clear negative-estimate message, got %q", w.Body.String())
+	}
+
+	w = updateIssue(issue.ID, map[string]any{"estimate_minutes": 1.5})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("UpdateIssue: expected 400 for non-integer estimate, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "estimate_minutes must be an integer or null") {
+		t.Fatalf("UpdateIssue: expected clear non-integer message, got %q", w.Body.String())
+	}
+
+	parent := createIssue(map[string]any{
+		"title":  "Estimate parent issue",
+		"status": "backlog",
+	})
+	memberLeafOne := createIssue(map[string]any{
+		"title":           "Member estimate leaf one",
+		"status":          "backlog",
+		"parent_issue_id": parent.ID,
+		"assignee_type":   "member",
+		"assignee_id":     testUserID,
+	})
+	memberLeafTwo := createIssue(map[string]any{
+		"title":           "Member estimate leaf two",
+		"status":          "backlog",
+		"parent_issue_id": parent.ID,
+		"assignee_type":   "member",
+		"assignee_id":     testUserID,
+	})
+	agentLeaf := createIssue(map[string]any{
+		"title":           "Agent estimate leaf",
+		"status":          "backlog",
+		"parent_issue_id": parent.ID,
+		"assignee_type":   "agent",
+		"assignee_id":     agentID,
+	})
+
+	setEstimate(memberLeafOne.ID, 30)
+	setEstimate(memberLeafTwo.ID, 45)
+	setEstimate(agentLeaf.ID, 999)
+
+	parentFetched := getIssue(parent.ID)
+	if parentFetched.ComputedEstimateMinutes != 75 {
+		t.Fatalf("GetIssue: expected computed_estimate_minutes 75, got %d", parentFetched.ComputedEstimateMinutes)
+	}
+
+	leaf := createIssue(map[string]any{
+		"title": "Standalone estimate leaf",
+	})
+	setEstimate(leaf.ID, 60)
+
+	leafFetched := getIssue(leaf.ID)
+	if leafFetched.ComputedEstimateMinutes != 0 {
+		t.Fatalf("GetIssue: expected leaf computed_estimate_minutes 0, got %d", leafFetched.ComputedEstimateMinutes)
+	}
+	if leafFetched.EstimateMinutes == nil || *leafFetched.EstimateMinutes != 60 {
+		t.Fatalf("GetIssue: expected leaf estimate_minutes 60, got %v", leafFetched.EstimateMinutes)
+	}
+}
+
 // TestCreateIssueDefaultStatusIsTodo verifies that issues created without an
 // explicit status default to "todo" so the daemon picks them up immediately.
 // Before this fix the default was "backlog", which daemons ignore.
@@ -1038,7 +1215,7 @@ func TestSendCodeDbError(t *testing.T) {
 	// We can't easily mock the DB here without changing architecture,
 	// but we can simulate a DB error by closing the pool temporarily or
 	// using a cancelled context if the query respects it.
-	
+
 	// Create a handler with a "broken" queries object is hard because it's a struct.
 	// Instead, let's use a context that is already cancelled.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1053,13 +1230,13 @@ func TestSendCodeDbError(t *testing.T) {
 	req = req.WithContext(ctx)
 
 	testHandler.SendCode(w, req)
-	
+
 	// If the DB query respects the cancelled context, it should return an error.
 	// pgx usually returns context.Canceled which is not what isNotFound checks for.
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("SendCode (db error): expected 500, got %d: %s", w.Code, w.Body.String())
 	}
-	
+
 	var resp map[string]string
 	json.NewDecoder(w.Body).Decode(&resp)
 	if resp["error"] != "failed to lookup user" {
