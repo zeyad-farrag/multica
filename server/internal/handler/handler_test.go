@@ -34,21 +34,12 @@ const (
 
 func TestMain(m *testing.M) {
 	ctx := context.Background()
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://multica:multica@localhost:5432/multica?sslmode=disable"
-	}
-
-	pool, err := pgxpool.New(ctx, dbURL)
+	pool, poolCleanup, dbSource, err := openHandlerTestPool(ctx)
 	if err != nil {
-		fmt.Printf("Skipping tests: could not connect to database: %v\n", err)
-		os.Exit(0)
+		fmt.Printf("Failed to initialize handler test database: %v\n", err)
+		os.Exit(1)
 	}
-	if err := pool.Ping(ctx); err != nil {
-		fmt.Printf("Skipping tests: database not reachable: %v\n", err)
-		pool.Close()
-		os.Exit(0)
-	}
+	fmt.Printf("Handler tests using %s\n", dbSource)
 
 	queries := db.New(pool)
 	hub := realtime.NewHub()
@@ -72,7 +63,12 @@ func TestMain(m *testing.M) {
 			code = 1
 		}
 	}
-	pool.Close()
+	if err := poolCleanup(); err != nil {
+		fmt.Printf("Failed to clean up handler test database: %v\n", err)
+		if code == 0 {
+			code = 1
+		}
+	}
 	os.Exit(code)
 }
 
@@ -1038,7 +1034,7 @@ func TestSendCodeDbError(t *testing.T) {
 	// We can't easily mock the DB here without changing architecture,
 	// but we can simulate a DB error by closing the pool temporarily or
 	// using a cancelled context if the query respects it.
-	
+
 	// Create a handler with a "broken" queries object is hard because it's a struct.
 	// Instead, let's use a context that is already cancelled.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1053,13 +1049,13 @@ func TestSendCodeDbError(t *testing.T) {
 	req = req.WithContext(ctx)
 
 	testHandler.SendCode(w, req)
-	
+
 	// If the DB query respects the cancelled context, it should return an error.
 	// pgx usually returns context.Canceled which is not what isNotFound checks for.
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("SendCode (db error): expected 500, got %d: %s", w.Code, w.Body.String())
 	}
-	
+
 	var resp map[string]string
 	json.NewDecoder(w.Body).Decode(&resp)
 	if resp["error"] != "failed to lookup user" {
