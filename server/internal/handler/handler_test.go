@@ -341,7 +341,7 @@ func TestUpdateIssueEstimateMinutes_RoundTrip(t *testing.T) {
 		t.Fatalf("failed to find test agent: %v", err)
 	}
 
-	createdIDs := make([]string, 0, 6)
+	createdIDs := make([]string, 0, 9)
 	createIssue := func(body map[string]any) IssueResponse {
 		t.Helper()
 
@@ -483,14 +483,36 @@ func TestUpdateIssueEstimateMinutes_RoundTrip(t *testing.T) {
 		"assignee_type":   "agent",
 		"assignee_id":     agentID,
 	})
+	unassignedLeaf := createIssue(map[string]any{
+		"title":           "Unassigned estimate leaf",
+		"status":          "backlog",
+		"parent_issue_id": parent.ID,
+	})
+	memberBranch := createIssue(map[string]any{
+		"title":           "Member estimate branch",
+		"status":          "backlog",
+		"parent_issue_id": parent.ID,
+		"assignee_type":   "member",
+		"assignee_id":     testUserID,
+	})
+	memberGrandchild := createIssue(map[string]any{
+		"title":           "Member estimate grandchild",
+		"status":          "backlog",
+		"parent_issue_id": memberBranch.ID,
+		"assignee_type":   "member",
+		"assignee_id":     testUserID,
+	})
 
 	setEstimate(memberLeafOne.ID, 30)
 	setEstimate(memberLeafTwo.ID, 45)
 	setEstimate(agentLeaf.ID, 999)
+	setEstimate(unassignedLeaf.ID, 20)
+	setEstimate(memberBranch.ID, 500)
+	setEstimate(memberGrandchild.ID, 15)
 
 	parentFetched := getIssue(parent.ID)
-	if parentFetched.ComputedEstimateMinutes != 75 {
-		t.Fatalf("GetIssue: expected computed_estimate_minutes 75, got %d", parentFetched.ComputedEstimateMinutes)
+	if parentFetched.ComputedEstimateMinutes != 110 {
+		t.Fatalf("GetIssue: expected computed_estimate_minutes 110, got %d", parentFetched.ComputedEstimateMinutes)
 	}
 
 	leaf := createIssue(map[string]any{
