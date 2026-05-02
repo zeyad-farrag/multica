@@ -65,6 +65,14 @@ export class TestApiClient {
 
       this.token = data.token;
 
+      const onboardingRes = await this.authedFetch("/api/me/onboarding/complete", {
+        method: "POST",
+        body: JSON.stringify({ completion_path: "skip_existing" }),
+      });
+      if (!onboardingRes.ok) {
+        throw new Error(`complete onboarding failed: ${onboardingRes.status}`);
+      }
+
       // Update user name if needed
       if (name && data.user?.name !== name) {
         await this.authedFetch("/api/me", {
@@ -100,6 +108,7 @@ export class TestApiClient {
     if (workspace) {
       this.workspaceId = workspace.id;
       this.workspaceSlug = workspace.slug;
+      await this.dismissStarterContentIfNeeded(workspace.id);
       return workspace;
     }
 
@@ -110,6 +119,8 @@ export class TestApiClient {
     if (res.ok) {
       const created = (await res.json()) as TestWorkspace;
       this.workspaceId = created.id;
+      this.workspaceSlug = created.slug;
+      await this.dismissStarterContentIfNeeded(created.id);
       return created;
     }
 
@@ -117,6 +128,8 @@ export class TestApiClient {
     const created = refreshed.find((item) => item.slug === slug) ?? refreshed[0];
     if (created) {
       this.workspaceId = created.id;
+      this.workspaceSlug = created.slug;
+      await this.dismissStarterContentIfNeeded(created.id);
       return created;
     }
 
@@ -162,5 +175,15 @@ export class TestApiClient {
     if (this.workspaceSlug) headers["X-Workspace-Slug"] = this.workspaceSlug;
     else if (this.workspaceId) headers["X-Workspace-ID"] = this.workspaceId;
     return fetch(`${API_BASE}${path}`, { ...init, headers });
+  }
+
+  private async dismissStarterContentIfNeeded(workspaceId: string) {
+    const res = await this.authedFetch("/api/me/starter-content/dismiss", {
+      method: "POST",
+      body: JSON.stringify({ workspace_id: workspaceId }),
+    });
+    if (!res.ok && res.status !== 409) {
+      throw new Error(`dismiss starter content failed: ${res.status}`);
+    }
   }
 }
