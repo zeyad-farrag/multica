@@ -390,6 +390,9 @@ func TestUpdateIssueEstimateMinutes_RoundTrip(t *testing.T) {
 		if setBody.EstimateMinutes == nil || *setBody.EstimateMinutes != 60 {
 			t.Fatalf("UpdateIssue: expected estimate_minutes 60, got %v", setBody.EstimateMinutes)
 		}
+		if setBody.ComputedEstimateMinutes != nil {
+			t.Fatalf("UpdateIssue: expected computed_estimate_minutes to be nil on update response, got %v", *setBody.ComputedEstimateMinutes)
+		}
 
 		mock.ExpectQuery(regexp.QuoteMeta("-- name: GetIssueInWorkspace :one")).
 			WithArgs(mustPGUUID(issueID), mustPGUUID(workspaceID)).
@@ -421,6 +424,9 @@ func TestUpdateIssueEstimateMinutes_RoundTrip(t *testing.T) {
 		}
 		if clearBody.EstimateMinutes != nil {
 			t.Fatalf("UpdateIssue: expected cleared estimate_minutes, got %v", *clearBody.EstimateMinutes)
+		}
+		if clearBody.ComputedEstimateMinutes != nil {
+			t.Fatalf("UpdateIssue: expected computed_estimate_minutes to be nil on update response, got %v", *clearBody.ComputedEstimateMinutes)
 		}
 
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -504,8 +510,8 @@ func TestUpdateIssueEstimateMinutes_RoundTrip(t *testing.T) {
 		if body.EstimateMinutes == nil || *body.EstimateMinutes != 60 {
 			t.Fatalf("GetIssue: expected estimate_minutes 60, got %v", body.EstimateMinutes)
 		}
-		if body.ComputedEstimateMinutes != 110 {
-			t.Fatalf("GetIssue: expected computed_estimate_minutes 110, got %d", body.ComputedEstimateMinutes)
+		if body.ComputedEstimateMinutes == nil || *body.ComputedEstimateMinutes != 110 {
+			t.Fatalf("GetIssue: expected computed_estimate_minutes 110, got %v", body.ComputedEstimateMinutes)
 		}
 
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -526,6 +532,7 @@ func TestUpdateIssueEstimateMinutes_RoundTrip(t *testing.T) {
 			"WHERE i.parent_issue_id = sqlc.arg('issue_id')",
 			"(d.assignee_type IS NULL OR d.assignee_type = 'member')",
 			"WHERE c.parent_issue_id = d.id",
+			"NOT (child.id = ANY(d.visited_ids))",
 		}
 		for _, snippet := range requiredQuerySnippets {
 			if !strings.Contains(queryText, snippet) {
@@ -572,6 +579,71 @@ func TestUpdateIssueEstimateMinutes_RoundTrip(t *testing.T) {
 			if !strings.Contains(downText, snippet) {
 				t.Fatalf("down migration missing snippet %q", snippet)
 			}
+		}
+	})
+}
+
+func TestBatchUpdateIssuesEstimateMinutes(t *testing.T) {
+	t.Run("applies estimate_minutes in batch updates", func(t *testing.T) {
+		handler, mock, issueID, workspaceID, userID := newEstimateMinutesMockHandler(t)
+
+		mock.ExpectQuery(regexp.QuoteMeta("-- name: GetIssueInWorkspace :one")).
+			WithArgs(mustPGUUID(issueID), mustPGUUID(workspaceID)).
+			WillReturnRows(issueRows(mockIssueRecord(issueID, workspaceID, userID, nil)))
+		mock.ExpectQuery(regexp.QuoteMeta("-- name: UpdateIssue :one")).
+			WithArgs(anyArgs(13)...).
+			WillReturnRows(issueRows(mockIssueRecord(issueID, workspaceID, userID, int32Ptr(45))))
+		mock.ExpectQuery(regexp.QuoteMeta("-- name: GetWorkspace :one")).
+			WithArgs(mustPGUUID(workspaceID)).
+			WillReturnRows(workspaceRows(workspaceID))
+
+		resp := httptest.NewRecorder()
+		req := mockIssueRequest(t, http.MethodPut, "/api/issues/batch", map[string]any{
+			"issue_ids": []string{issueID},
+			"updates": map[string]any{
+				"estimate_minutes": 45,
+			},
+		}, userID, workspaceID)
+
+		handler.BatchUpdateIssues(resp, req)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("BatchUpdateIssues: expected 200, got %d: %s", resp.Code, resp.Body.String())
+		}
+
+		var body map[string]int
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("BatchUpdateIssues: failed to decode response: %v", err)
+		}
+		if body["updated"] != 1 {
+			t.Fatalf("BatchUpdateIssues: expected updated=1, got %#v", body)
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("mock expectations: %v", err)
+		}
+	})
+
+	t.Run("rejects non-positive estimate_minutes before issuing updates", func(t *testing.T) {
+		handler, mock, issueID, workspaceID, userID := newEstimateMinutesMockHandler(t)
+
+		resp := httptest.NewRecorder()
+		req := mockIssueRequest(t, http.MethodPut, "/api/issues/batch", map[string]any{
+			"issue_ids": []string{issueID},
+			"updates": map[string]any{
+				"estimate_minutes": 0,
+			},
+		}, userID, workspaceID)
+
+		handler.BatchUpdateIssues(resp, req)
+		if resp.Code != http.StatusBadRequest {
+			t.Fatalf("BatchUpdateIssues: expected 400, got %d: %s", resp.Code, resp.Body.String())
+		}
+		if !strings.Contains(resp.Body.String(), "estimate_minutes must be \\u003e 0") {
+			t.Fatalf("BatchUpdateIssues: expected estimate validation error, got %q", resp.Body.String())
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("mock expectations: %v", err)
 		}
 	})
 }

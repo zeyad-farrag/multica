@@ -180,7 +180,7 @@ type IssueResponse struct {
 	ParentIssueID           *string                 `json:"parent_issue_id"`
 	ProjectID               *string                 `json:"project_id"`
 	EstimateMinutes         *int32                  `json:"estimate_minutes"`
-	ComputedEstimateMinutes int32                   `json:"computed_estimate_minutes"`
+	ComputedEstimateMinutes *int32                  `json:"computed_estimate_minutes"`
 	Position                float64                 `json:"position"`
 	DueDate                 *string                 `json:"due_date"`
 	CreatedAt               string                  `json:"created_at"`
@@ -874,6 +874,7 @@ func (h *Handler) GetIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	prefix := h.getIssuePrefix(r.Context(), issue.WorkspaceID)
 	resp := issueToResponse(issue, prefix)
+	rollupValue := int32(0)
 	rollup, err := h.Queries.ComputeIssueEstimateRollup(r.Context(), db.ComputeIssueEstimateRollupParams{
 		IssueID:     issue.ID,
 		WorkspaceID: issue.WorkspaceID,
@@ -881,8 +882,9 @@ func (h *Handler) GetIssue(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.Warn("compute issue estimate rollup failed", append(logger.RequestAttrs(r), "error", err, "issue_id", uuidToString(issue.ID), "workspace_id", uuidToString(issue.WorkspaceID))...)
 	} else {
-		resp.ComputedEstimateMinutes = rollup
+		rollupValue = rollup
 	}
+	resp.ComputedEstimateMinutes = &rollupValue
 
 	// Fetch issue reactions.
 	reactions, err := h.Queries.ListIssueReactions(r.Context(), issue.ID)
@@ -1571,6 +1573,27 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Detect which fields in "updates" were explicitly set (including null).
+	var rawTop map[string]json.RawMessage
+	if err := json.Unmarshal(bodyBytes, &rawTop); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	var rawUpdates map[string]json.RawMessage
+	if raw, exists := rawTop["updates"]; exists {
+		if err := json.Unmarshal(raw, &rawUpdates); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+	}
+	if rawEstimate, ok := rawUpdates["estimate_minutes"]; ok && string(rawEstimate) != "null" {
+		var estimate int32
+		if err := json.Unmarshal(rawEstimate, &estimate); err != nil {
+			writeError(w, http.StatusBadRequest, "estimate_minutes must be an integer or null")
+			return
+		}
+	}
+
 	var req BatchUpdateIssuesRequest
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -1587,12 +1610,9 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Detect which fields in "updates" were explicitly set (including null).
-	var rawTop map[string]json.RawMessage
-	json.Unmarshal(bodyBytes, &rawTop)
-	var rawUpdates map[string]json.RawMessage
-	if raw, exists := rawTop["updates"]; exists {
-		json.Unmarshal(raw, &rawUpdates)
+	if _, ok := rawUpdates["estimate_minutes"]; ok && req.Updates.EstimateMinutes != nil && *req.Updates.EstimateMinutes <= 0 {
+		writeError(w, http.StatusBadRequest, "estimate_minutes must be > 0")
+		return
 	}
 
 	workspaceID := h.resolveWorkspaceID(r)
@@ -1711,6 +1731,13 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 				params.ProjectID = parseUUID(*req.Updates.ProjectID)
 			} else {
 				params.ProjectID = pgtype.UUID{Valid: false}
+			}
+		}
+		if _, ok := rawUpdates["estimate_minutes"]; ok {
+			if req.Updates.EstimateMinutes != nil {
+				params.EstimateMinutes = pgtype.Int4{Int32: *req.Updates.EstimateMinutes, Valid: true}
+			} else {
+				params.EstimateMinutes = pgtype.Int4{Valid: false}
 			}
 		}
 

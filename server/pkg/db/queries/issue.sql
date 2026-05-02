@@ -108,15 +108,17 @@ ORDER BY position ASC, created_at DESC;
 
 -- name: ComputeIssueEstimateRollup :one
 WITH RECURSIVE descendants AS (
-    SELECT i.id, i.parent_issue_id, i.assignee_type, i.estimate_minutes
+    SELECT i.id, i.parent_issue_id, i.assignee_type, i.estimate_minutes, ARRAY[i.id]::uuid[] AS visited_ids
     FROM issue i
     WHERE i.parent_issue_id = sqlc.arg('issue_id')
       AND i.workspace_id = sqlc.arg('workspace_id')
     UNION ALL
-    SELECT child.id, child.parent_issue_id, child.assignee_type, child.estimate_minutes
+    SELECT child.id, child.parent_issue_id, child.assignee_type, child.estimate_minutes, d.visited_ids || child.id
     FROM issue child
     JOIN descendants d ON child.parent_issue_id = d.id
     WHERE child.workspace_id = sqlc.arg('workspace_id')
+      AND NOT (child.id = ANY(d.visited_ids))
+      AND cardinality(d.visited_ids) < 256
 )
 SELECT COALESCE(SUM(d.estimate_minutes), 0)::int
 FROM descendants d
