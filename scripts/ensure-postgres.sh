@@ -66,22 +66,47 @@ is_local() {
   [ -z "$DATABASE_URL" ] || [ "$db_host" = "localhost" ] || [ "$db_host" = "127.0.0.1" ] || [ "$db_host" = "::1" ]
 }
 
+docker_cmd=(docker)
+
+resolve_docker_access() {
+  if docker version > /dev/null 2>&1; then
+    return 0
+  fi
+
+  if command -v sudo > /dev/null 2>&1 && sudo -n docker version > /dev/null 2>&1; then
+    docker_cmd=(sudo -n docker)
+    echo "==> Docker requires sudo; using sudo -n docker."
+    return 0
+  fi
+
+  return 1
+}
+
+run_docker() {
+  "${docker_cmd[@]}" "$@"
+}
+
 if is_local; then
   # ---------- Local: use Docker ----------
+  if ! resolve_docker_access; then
+    echo "Unable to access Docker for local PostgreSQL."
+    exit 1
+  fi
+
   echo "==> Ensuring shared PostgreSQL container is running on localhost:5432..."
-  docker compose up -d postgres
+  run_docker compose up -d postgres
 
   echo "==> Waiting for PostgreSQL to be ready..."
-  until docker compose exec -T postgres pg_isready -U "$POSTGRES_USER" -d postgres > /dev/null 2>&1; do
+  until run_docker compose exec -T postgres pg_isready -U "$POSTGRES_USER" -d postgres > /dev/null 2>&1; do
     sleep 1
   done
 
   echo "==> Ensuring database '$POSTGRES_DB' exists..."
-  db_exists="$(docker compose exec -T postgres \
+  db_exists="$(run_docker compose exec -T postgres \
     psql -U "$POSTGRES_USER" -d postgres -Atqc "SELECT 1 FROM pg_database WHERE datname = '$POSTGRES_DB'")"
 
   if [ "$db_exists" != "1" ]; then
-    docker compose exec -T postgres \
+    run_docker compose exec -T postgres \
       psql -U "$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 \
       -c "CREATE DATABASE \"$POSTGRES_DB\"" \
       > /dev/null
