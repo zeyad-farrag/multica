@@ -1,6 +1,10 @@
 import { test, expect } from "@playwright/test";
 import { loginAsDefault } from "./helpers";
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 test.describe("Settings", () => {
   test("updating workspace name reflects in sidebar immediately", async ({
     page,
@@ -9,7 +13,14 @@ test.describe("Settings", () => {
 
     // Read the current workspace name from the sidebar
     const sidebarName = page.locator('button[data-sidebar="menu-button"]').first();
-    const originalName = (await sidebarName.innerText()).split("\n").at(-1)?.trim() ?? "";
+    const originalName = (await sidebarName.innerText())
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .at(-1);
+    if (!originalName) {
+      throw new Error("Could not resolve workspace name from sidebar menu button");
+    }
 
     // Navigate to settings
     await page.getByRole("link", { name: "Settings" }).click();
@@ -29,12 +40,12 @@ test.describe("Settings", () => {
     await page.locator("button", { hasText: "Save" }).click();
 
     // Sidebar should reflect the new name WITHOUT page refresh
-    await expect(page.getByRole("button", { name: new RegExp(newName) })).toBeVisible();
+    await expect(page.getByRole("button", { name: new RegExp(escapeRegExp(newName)) })).toBeVisible();
 
     // Restore original name so other tests aren't affected
     await nameInput.clear();
     await nameInput.fill(originalName);
     await page.locator("button", { hasText: "Save" }).click();
-    await expect(page.getByRole("button", { name: new RegExp(originalName) })).toBeVisible();
+    await expect(page.getByRole("button", { name: new RegExp(escapeRegExp(originalName)) })).toBeVisible();
   });
 });
