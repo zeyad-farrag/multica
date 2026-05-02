@@ -18,6 +18,8 @@ POSTGRES_DB="${POSTGRES_DB:-multica}"
 POSTGRES_USER="${POSTGRES_USER:-multica}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-multica}"
 DATABASE_URL="${DATABASE_URL:-}"
+PG_READY_MAX_RETRIES="${PG_READY_MAX_RETRIES:-60}"
+PG_READY_SLEEP_SECONDS="${PG_READY_SLEEP_SECONDS:-1}"
 
 export PGPASSWORD="$POSTGRES_PASSWORD"
 
@@ -97,8 +99,14 @@ if is_local; then
   run_docker compose up -d postgres
 
   echo "==> Waiting for PostgreSQL to be ready..."
-  until run_docker compose exec -T postgres pg_isready -U "$POSTGRES_USER" -d postgres > /dev/null 2>&1; do
-    sleep 1
+  pg_ready_attempts=0
+  while ! run_docker compose exec -T postgres pg_isready -U "$POSTGRES_USER" -d postgres > /dev/null 2>&1; do
+    pg_ready_attempts=$((pg_ready_attempts + 1))
+    if [ "$pg_ready_attempts" -ge "$PG_READY_MAX_RETRIES" ]; then
+      echo "Postgres not ready after ${PG_READY_MAX_RETRIES} attempts (db=${POSTGRES_DB}, user=${POSTGRES_USER})." >&2
+      exit 1
+    fi
+    sleep "$PG_READY_SLEEP_SECONDS"
   done
 
   echo "==> Ensuring database '$POSTGRES_DB' exists..."

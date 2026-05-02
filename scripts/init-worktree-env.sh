@@ -44,6 +44,14 @@ run_docker() {
   "${docker_cmd[@]}" "$@"
 }
 
+urlencode() {
+  if ! command -v python3 > /dev/null 2>&1; then
+    echo "python3 is required to percent-encode DATABASE_URL credentials." >&2
+    exit 1
+  fi
+  python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
+}
+
 load_shared_postgres_credentials() {
   local container_id shared_env line
 
@@ -52,17 +60,20 @@ load_shared_postgres_credentials() {
   fi
 
   if ! resolve_docker_access; then
-    return 0
+    echo "Unable to access Docker to read shared Postgres credentials. Run scripts/ensure-postgres.sh first or export POSTGRES_USER and POSTGRES_PASSWORD before invoking this script." >&2
+    exit 1
   fi
 
   container_id="$(run_docker compose ps -q postgres 2> /dev/null || true)"
   if [ -z "$container_id" ]; then
-    return 0
+    echo "Shared postgres container is not running. Run scripts/ensure-postgres.sh first or export POSTGRES_USER and POSTGRES_PASSWORD before invoking this script." >&2
+    exit 1
   fi
 
   shared_env="$(run_docker inspect "$container_id" --format '{{range .Config.Env}}{{println .}}{{end}}' 2> /dev/null || true)"
   if [ -z "$shared_env" ]; then
-    return 0
+    echo "Failed to inspect the shared postgres container for credentials. Run scripts/ensure-postgres.sh first or export POSTGRES_USER and POSTGRES_PASSWORD before invoking this script." >&2
+    exit 1
   fi
 
   while IFS= read -r line; do
@@ -84,15 +95,20 @@ EOF
 }
 
 load_shared_postgres_credentials
-postgres_user="${postgres_user:-multica}"
-postgres_password="${postgres_password:-multica}"
+if [ -z "$postgres_user" ] || [ -z "$postgres_password" ]; then
+  echo "Shared Postgres credentials are incomplete. Export POSTGRES_USER and POSTGRES_PASSWORD or run scripts/ensure-postgres.sh before invoking this script." >&2
+  exit 1
+fi
+
+encoded_postgres_user="$(urlencode "$postgres_user")"
+encoded_postgres_password="$(urlencode "$postgres_password")"
 
 cat > "$ENV_FILE" <<EOF
 POSTGRES_DB=${postgres_db}
 POSTGRES_USER=${postgres_user}
 POSTGRES_PASSWORD=${postgres_password}
 POSTGRES_PORT=${postgres_port}
-DATABASE_URL=postgres://${postgres_user}:${postgres_password}@localhost:${postgres_port}/${postgres_db}?sslmode=disable
+DATABASE_URL=postgres://${encoded_postgres_user}:${encoded_postgres_password}@localhost:${postgres_port}/${postgres_db}?sslmode=disable
 
 PORT=${backend_port}
 JWT_SECRET=change-me-in-production
