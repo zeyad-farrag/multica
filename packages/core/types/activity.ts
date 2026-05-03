@@ -21,6 +21,10 @@ export interface TimelineEntry {
   parent_id?: string | null;
   updated_at?: string;
   comment_type?: string;
+  /** Set on `cr_review_comment` rows; the link from a CR thread to its timeline entry. */
+  review_thread_id?: string | null;
+  /** Set on `fixer_reply` rows after Marcus mirrors them to GitHub. NULL/undefined = pending. */
+  posted_to_github_at?: string | null;
   reactions?: Reaction[];
   attachments?: Attachment[];
 }

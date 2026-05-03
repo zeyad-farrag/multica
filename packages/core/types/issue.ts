@@ -9,6 +9,8 @@ export type IssueStatus =
   | "code_review"
   | "fixing"
   | "testing"
+  | "coderabbit"
+  | "resolving"
   | "in_review"
   | "staged"
   | "done"

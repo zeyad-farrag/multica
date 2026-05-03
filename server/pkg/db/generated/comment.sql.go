@@ -31,7 +31,7 @@ func (q *Queries) CountComments(ctx context.Context, arg CountCommentsParams) (i
 const createComment = `-- name: CreateComment :one
 INSERT INTO comment (issue_id, workspace_id, author_type, author_id, content, type, parent_id)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, issue_id, author_type, author_id, content, type, created_at, updated_at, parent_id, workspace_id
+RETURNING id, issue_id, author_type, author_id, content, type, created_at, updated_at, parent_id, workspace_id, review_thread_id, posted_to_github_at
 `
 
 type CreateCommentParams struct {
@@ -66,6 +66,8 @@ func (q *Queries) CreateComment(ctx context.Context, arg CreateCommentParams) (C
 		&i.UpdatedAt,
 		&i.ParentID,
 		&i.WorkspaceID,
+		&i.ReviewThreadID,
+		&i.PostedToGithubAt,
 	)
 	return i, err
 }
@@ -80,7 +82,7 @@ func (q *Queries) DeleteComment(ctx context.Context, id pgtype.UUID) error {
 }
 
 const getComment = `-- name: GetComment :one
-SELECT id, issue_id, author_type, author_id, content, type, created_at, updated_at, parent_id, workspace_id FROM comment
+SELECT id, issue_id, author_type, author_id, content, type, created_at, updated_at, parent_id, workspace_id, review_thread_id, posted_to_github_at FROM comment
 WHERE id = $1
 `
 
@@ -98,12 +100,14 @@ func (q *Queries) GetComment(ctx context.Context, id pgtype.UUID) (Comment, erro
 		&i.UpdatedAt,
 		&i.ParentID,
 		&i.WorkspaceID,
+		&i.ReviewThreadID,
+		&i.PostedToGithubAt,
 	)
 	return i, err
 }
 
 const getCommentInWorkspace = `-- name: GetCommentInWorkspace :one
-SELECT id, issue_id, author_type, author_id, content, type, created_at, updated_at, parent_id, workspace_id FROM comment
+SELECT id, issue_id, author_type, author_id, content, type, created_at, updated_at, parent_id, workspace_id, review_thread_id, posted_to_github_at FROM comment
 WHERE id = $1 AND workspace_id = $2
 `
 
@@ -126,6 +130,8 @@ func (q *Queries) GetCommentInWorkspace(ctx context.Context, arg GetCommentInWor
 		&i.UpdatedAt,
 		&i.ParentID,
 		&i.WorkspaceID,
+		&i.ReviewThreadID,
+		&i.PostedToGithubAt,
 	)
 	return i, err
 }
@@ -174,7 +180,7 @@ func (q *Queries) HasAgentRepliedInThread(ctx context.Context, arg HasAgentRepli
 }
 
 const listComments = `-- name: ListComments :many
-SELECT id, issue_id, author_type, author_id, content, type, created_at, updated_at, parent_id, workspace_id FROM comment
+SELECT id, issue_id, author_type, author_id, content, type, created_at, updated_at, parent_id, workspace_id, review_thread_id, posted_to_github_at FROM comment
 WHERE issue_id = $1 AND workspace_id = $2
 ORDER BY created_at ASC
 `
@@ -204,6 +210,8 @@ func (q *Queries) ListComments(ctx context.Context, arg ListCommentsParams) ([]C
 			&i.UpdatedAt,
 			&i.ParentID,
 			&i.WorkspaceID,
+			&i.ReviewThreadID,
+			&i.PostedToGithubAt,
 		); err != nil {
 			return nil, err
 		}
@@ -216,7 +224,7 @@ func (q *Queries) ListComments(ctx context.Context, arg ListCommentsParams) ([]C
 }
 
 const listCommentsPaginated = `-- name: ListCommentsPaginated :many
-SELECT id, issue_id, author_type, author_id, content, type, created_at, updated_at, parent_id, workspace_id FROM comment
+SELECT id, issue_id, author_type, author_id, content, type, created_at, updated_at, parent_id, workspace_id, review_thread_id, posted_to_github_at FROM comment
 WHERE issue_id = $1 AND workspace_id = $2
 ORDER BY created_at ASC
 LIMIT $3 OFFSET $4
@@ -254,6 +262,8 @@ func (q *Queries) ListCommentsPaginated(ctx context.Context, arg ListCommentsPag
 			&i.UpdatedAt,
 			&i.ParentID,
 			&i.WorkspaceID,
+			&i.ReviewThreadID,
+			&i.PostedToGithubAt,
 		); err != nil {
 			return nil, err
 		}
@@ -266,7 +276,7 @@ func (q *Queries) ListCommentsPaginated(ctx context.Context, arg ListCommentsPag
 }
 
 const listCommentsSince = `-- name: ListCommentsSince :many
-SELECT id, issue_id, author_type, author_id, content, type, created_at, updated_at, parent_id, workspace_id FROM comment
+SELECT id, issue_id, author_type, author_id, content, type, created_at, updated_at, parent_id, workspace_id, review_thread_id, posted_to_github_at FROM comment
 WHERE issue_id = $1 AND workspace_id = $2 AND created_at > $3
 ORDER BY created_at ASC
 `
@@ -297,6 +307,8 @@ func (q *Queries) ListCommentsSince(ctx context.Context, arg ListCommentsSincePa
 			&i.UpdatedAt,
 			&i.ParentID,
 			&i.WorkspaceID,
+			&i.ReviewThreadID,
+			&i.PostedToGithubAt,
 		); err != nil {
 			return nil, err
 		}
@@ -309,7 +321,7 @@ func (q *Queries) ListCommentsSince(ctx context.Context, arg ListCommentsSincePa
 }
 
 const listCommentsSincePaginated = `-- name: ListCommentsSincePaginated :many
-SELECT id, issue_id, author_type, author_id, content, type, created_at, updated_at, parent_id, workspace_id FROM comment
+SELECT id, issue_id, author_type, author_id, content, type, created_at, updated_at, parent_id, workspace_id, review_thread_id, posted_to_github_at FROM comment
 WHERE issue_id = $1 AND workspace_id = $2 AND created_at > $3
 ORDER BY created_at ASC
 LIMIT $4 OFFSET $5
@@ -349,6 +361,8 @@ func (q *Queries) ListCommentsSincePaginated(ctx context.Context, arg ListCommen
 			&i.UpdatedAt,
 			&i.ParentID,
 			&i.WorkspaceID,
+			&i.ReviewThreadID,
+			&i.PostedToGithubAt,
 		); err != nil {
 			return nil, err
 		}
@@ -360,12 +374,104 @@ func (q *Queries) ListCommentsSincePaginated(ctx context.Context, arg ListCommen
 	return items, nil
 }
 
+const listFixerRepliesForThread = `-- name: ListFixerRepliesForThread :many
+SELECT c.id, c.issue_id, c.author_type, c.author_id, c.content, c.type, c.created_at, c.updated_at, c.parent_id, c.workspace_id, c.review_thread_id
+FROM comment c
+JOIN comment p ON c.parent_id = p.id
+WHERE p.review_thread_id = $1
+  AND p.type = 'cr_review_comment'
+  AND c.type = 'fixer_reply'
+ORDER BY c.created_at ASC
+`
+
+type ListFixerRepliesForThreadRow struct {
+	ID             pgtype.UUID        `json:"id"`
+	IssueID        pgtype.UUID        `json:"issue_id"`
+	AuthorType     string             `json:"author_type"`
+	AuthorID       pgtype.UUID        `json:"author_id"`
+	Content        string             `json:"content"`
+	Type           string             `json:"type"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	ParentID       pgtype.UUID        `json:"parent_id"`
+	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
+	ReviewThreadID pgtype.UUID        `json:"review_thread_id"`
+}
+
+// Returns Rosa's queued fixer_reply rows for a single review thread, oldest
+// first. Joins through the parent cr_review_comment row so we resolve via
+// parent_id (the UI's nesting key) rather than duplicating review_thread_id
+// onto every reply. Marcus's bmad-pr-resolve skill walks these rows,
+// posts each content verbatim to GitHub, and resolves the thread.
+func (q *Queries) ListFixerRepliesForThread(ctx context.Context, reviewThreadID pgtype.UUID) ([]ListFixerRepliesForThreadRow, error) {
+	rows, err := q.db.Query(ctx, listFixerRepliesForThread, reviewThreadID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListFixerRepliesForThreadRow{}
+	for rows.Next() {
+		var i ListFixerRepliesForThreadRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.IssueID,
+			&i.AuthorType,
+			&i.AuthorID,
+			&i.Content,
+			&i.Type,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ParentID,
+			&i.WorkspaceID,
+			&i.ReviewThreadID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const markFixerReplyPosted = `-- name: MarkFixerReplyPosted :one
+UPDATE comment SET
+    posted_to_github_at = COALESCE(posted_to_github_at, now()),
+    updated_at          = now()
+WHERE id = $1 AND type = 'fixer_reply'
+RETURNING id, issue_id, author_type, author_id, content, type, created_at, updated_at, parent_id, workspace_id, review_thread_id, posted_to_github_at
+`
+
+// Stamp posted_to_github_at on a fixer_reply row after Marcus successfully
+// mirrors it to GitHub via the review-threads/{id}/reply endpoint. Idempotent:
+// a second call returns the row with its existing timestamp unchanged.
+func (q *Queries) MarkFixerReplyPosted(ctx context.Context, id pgtype.UUID) (Comment, error) {
+	row := q.db.QueryRow(ctx, markFixerReplyPosted, id)
+	var i Comment
+	err := row.Scan(
+		&i.ID,
+		&i.IssueID,
+		&i.AuthorType,
+		&i.AuthorID,
+		&i.Content,
+		&i.Type,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ParentID,
+		&i.WorkspaceID,
+		&i.ReviewThreadID,
+		&i.PostedToGithubAt,
+	)
+	return i, err
+}
+
 const updateComment = `-- name: UpdateComment :one
 UPDATE comment SET
     content = $2,
     updated_at = now()
 WHERE id = $1
-RETURNING id, issue_id, author_type, author_id, content, type, created_at, updated_at, parent_id, workspace_id
+RETURNING id, issue_id, author_type, author_id, content, type, created_at, updated_at, parent_id, workspace_id, review_thread_id, posted_to_github_at
 `
 
 type UpdateCommentParams struct {
@@ -387,6 +493,58 @@ func (q *Queries) UpdateComment(ctx context.Context, arg UpdateCommentParams) (C
 		&i.UpdatedAt,
 		&i.ParentID,
 		&i.WorkspaceID,
+		&i.ReviewThreadID,
+		&i.PostedToGithubAt,
+	)
+	return i, err
+}
+
+const upsertCRReviewComment = `-- name: UpsertCRReviewComment :one
+INSERT INTO comment (
+    issue_id, workspace_id, author_type, author_id, content, type, review_thread_id
+) VALUES (
+    $1, $2, 'system', NULL, $3, 'cr_review_comment', $4
+)
+ON CONFLICT (review_thread_id)
+WHERE review_thread_id IS NOT NULL
+DO UPDATE SET
+    content    = EXCLUDED.content,
+    updated_at = now()
+RETURNING id, issue_id, author_type, author_id, content, type, created_at, updated_at, parent_id, workspace_id, review_thread_id, posted_to_github_at
+`
+
+type UpsertCRReviewCommentParams struct {
+	IssueID        pgtype.UUID `json:"issue_id"`
+	WorkspaceID    pgtype.UUID `json:"workspace_id"`
+	Content        string      `json:"content"`
+	ReviewThreadID pgtype.UUID `json:"review_thread_id"`
+}
+
+// Idempotent insert/update of a CodeRabbit review comment as a first-class
+// timeline entry. Keyed on review_thread_id so re-deliveries of the same
+// pull_request_review_comment.created/edited webhook update content in
+// place rather than creating duplicates.
+func (q *Queries) UpsertCRReviewComment(ctx context.Context, arg UpsertCRReviewCommentParams) (Comment, error) {
+	row := q.db.QueryRow(ctx, upsertCRReviewComment,
+		arg.IssueID,
+		arg.WorkspaceID,
+		arg.Content,
+		arg.ReviewThreadID,
+	)
+	var i Comment
+	err := row.Scan(
+		&i.ID,
+		&i.IssueID,
+		&i.AuthorType,
+		&i.AuthorID,
+		&i.Content,
+		&i.Type,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ParentID,
+		&i.WorkspaceID,
+		&i.ReviewThreadID,
+		&i.PostedToGithubAt,
 	)
 	return i, err
 }

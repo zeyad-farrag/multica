@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import { ChevronRight, Copy, Download, FileText, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
+import { Bot, CheckCircle2, ChevronRight, Clock, Copy, Download, FileText, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Card } from "@multica/ui/components/ui/card";
 import { Button } from "@multica/ui/components/ui/button";
@@ -146,6 +146,73 @@ function AttachmentList({ attachments, content, className }: { attachments?: Att
 }
 
 // ---------------------------------------------------------------------------
+// CodeRabbit / fixer_reply rendering helpers
+// ---------------------------------------------------------------------------
+
+// isCRComment: top-level CR review-thread mirror. System-authored, no Multica
+// user — render with a pink "CodeRabbit" identity instead of "System".
+function isCRComment(entry: TimelineEntry): boolean {
+  return entry.comment_type === "cr_review_comment";
+}
+
+// isFixerReply: Rosa's per-thread reply. Agent-authored. Appears nested under
+// a cr_review_comment row via parent_id.
+function isFixerReply(entry: TimelineEntry): boolean {
+  return entry.comment_type === "fixer_reply";
+}
+
+// CRBotIcon: small bot avatar for CodeRabbit comments. Pink to match the
+// `coderabbit` column accent in STATUS_CONFIG.
+function CRBotIcon({ size = 24 }: { size?: number }) {
+  return (
+    <div
+      className="flex items-center justify-center rounded-full bg-pink-500/15 text-pink-500 ring-1 ring-pink-500/30"
+      style={{ width: size, height: size }}
+    >
+      <Bot className="h-3.5 w-3.5" />
+    </div>
+  );
+}
+
+// FixerReplyPill: small status chip on a fixer_reply row showing whether
+// Marcus has mirrored it to GitHub yet. Keyed off entry.posted_to_github_at.
+function FixerReplyPill({ entry }: { entry: TimelineEntry }) {
+  if (!isFixerReply(entry)) return null;
+  if (entry.posted_to_github_at) {
+    return (
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <span className="inline-flex items-center gap-1 rounded-full bg-success/10 px-1.5 py-0.5 text-[10px] font-medium text-success ring-1 ring-success/20">
+              <CheckCircle2 className="h-3 w-3" />
+              Posted
+            </span>
+          }
+        />
+        <TooltipContent side="top">
+          Mirrored to GitHub at {new Date(entry.posted_to_github_at).toLocaleString()}
+        </TooltipContent>
+      </Tooltip>
+    );
+  }
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span className="inline-flex items-center gap-1 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground ring-1 ring-border">
+            <Clock className="h-3 w-3" />
+            Pending
+          </span>
+        }
+      />
+      <TooltipContent side="top">
+        Waiting for the PR Manager to mirror this reply to GitHub
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Single comment row (used for both parent and replies within the same Card)
 // ---------------------------------------------------------------------------
 
@@ -210,13 +277,16 @@ function CommentRow({
   const contentText = entry.content ?? "";
   const isLongContent = contentText.length > 500 || contentText.split("\n").length > 8;
 
+  const cr = isCRComment(entry);
+
   return (
     <div className={`py-3${isTemp ? " opacity-60" : ""}`}>
       <div className="flex items-center gap-2.5">
-        <ActorAvatar actorType={entry.actor_type} actorId={entry.actor_id} size={24} />
-        <span className="text-sm font-medium">
-          {getActorName(entry.actor_type, entry.actor_id)}
+        {cr ? <CRBotIcon /> : <ActorAvatar actorType={entry.actor_type} actorId={entry.actor_id} size={24} />}
+        <span className={cn("text-sm font-medium", cr && "text-pink-500")}>
+          {cr ? "CodeRabbit" : getActorName(entry.actor_type, entry.actor_id)}
         </span>
+        <FixerReplyPill entry={entry} />
         <Tooltip>
           <TooltipTrigger
             render={
@@ -408,8 +478,15 @@ function CommentCard({
 
   const isHighlighted = highlightedCommentId === entry.id;
 
+  const cr = isCRComment(entry);
+
   return (
-    <Card className={cn("!py-0 !gap-0 overflow-hidden transition-colors duration-700", isTemp && "opacity-60", isHighlighted && "ring-2 ring-brand/50 bg-brand/5")}>
+    <Card className={cn(
+      "!py-0 !gap-0 overflow-hidden transition-colors duration-700",
+      isTemp && "opacity-60",
+      isHighlighted && "ring-2 ring-brand/50 bg-brand/5",
+      cr && "border-l-4 border-l-pink-500",
+    )}>
       <Collapsible open={open} onOpenChange={handleOpenChange}>
         {/* Header — always visible, acts as toggle */}
         <div className="px-4 py-3">
@@ -417,9 +494,9 @@ function CommentCard({
             <CollapsibleTrigger className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors">
               <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", open && "rotate-90")} />
             </CollapsibleTrigger>
-            <ActorAvatar actorType={entry.actor_type} actorId={entry.actor_id} size={24} />
-            <span className="shrink-0 text-sm font-medium">
-              {getActorName(entry.actor_type, entry.actor_id)}
+            {cr ? <CRBotIcon /> : <ActorAvatar actorType={entry.actor_type} actorId={entry.actor_id} size={24} />}
+            <span className={cn("shrink-0 text-sm font-medium", cr && "text-pink-500")}>
+              {cr ? "CodeRabbit" : getActorName(entry.actor_type, entry.actor_id)}
             </span>
             <Tooltip>
               <TooltipTrigger

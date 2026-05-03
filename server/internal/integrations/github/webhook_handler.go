@@ -35,6 +35,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -234,15 +235,13 @@ func (h *WebhookHandler) handlePR(ctx context.Context, payload map[string]json.R
 		return res, err
 	}
 
-	// Bug D fix (2026-04-28): if the merge transitioned in_review → staged
-	// (because CodeRabbit isn't installed on the repo, or the merge happened
-	// before the CR predicate fired), chain a follow-up staged → done so the
-	// final card state matches reality. This mirrors the user-expected
-	// flow: CR signals "ready to merge" → staged → human merges → done. We
-	// run this only when the just-applied decision is the
-	// `pr_merged_from_in_review` activity kind, so the handler stays
-	// idempotent for normal merges (where the issue was already at staged).
-	if dec.NewStatus == StatusStaged && dec.ActivityKind == "pr_merged_from_in_review" {
+	// If the merge transitioned coderabbit → staged or in_review → staged
+	// (CR not installed on the repo, race ahead of predicate, etc.), chain a
+	// follow-up staged → done so the final card state matches reality. This
+	// mirrors the user-expected flow: CR clean → staged → human merges → done.
+	// Idempotent for normal merges (where the issue was already at staged).
+	if dec.NewStatus == StatusStaged &&
+		(dec.ActivityKind == "pr_merged_from_in_review" || dec.ActivityKind == "pr_merged_from_coderabbit") {
 		refetched, ferr := h.Queries.GetIssue(ctx, issue.ID)
 		if ferr == nil && refetched.Status == StatusStaged {
 			followupIn := Input{
@@ -282,6 +281,23 @@ func (h *WebhookHandler) handleReview(ctx context.Context, payload map[string]js
 	}
 	if !found {
 		return &dispatchResult{label: "issue_not_found", fields: map[string]any{"pr_number": p.PR.Number}}, nil
+	}
+
+	// Bulk-mirror the review's inline findings (CR only) before predicate +
+	// Decide. GitHub delivers `pull_request_review` ahead of the per-finding
+	// `pull_request_review_comment` webhooks, so without this fetch the
+	// LocalUnresolvedThreadCount branch in decideReview would race the count
+	// to zero and noop. Pulling them via REST is the canonical source — the
+	// per-comment webhooks become idempotent re-deliveries afterward.
+	// Failure degrades to the per-comment-driven path (see handleReviewComment).
+	if strings.EqualFold(p.Review.User.Login, binding.CrBotUsername) {
+		if merr := h.bulkMirrorReviewComments(ctx, binding, issue, p.PR.Number, p.Review.ID); merr != nil {
+			slog.Warn("webhook: bulk-mirror CR review comments failed",
+				"issue", uuidStr(issue.ID),
+				"review_id", p.Review.ID,
+				"error", merr,
+			)
+		}
 	}
 
 	noOpenChanges, noUnresolved, unresolvedCount, err := h.predicate(ctx, binding, p.PR.Number, issue.ID)
@@ -415,7 +431,7 @@ func (h *WebhookHandler) handleReviewComment(ctx context.Context, payload map[st
 		return &dispatchResult{label: "issue_not_found", fields: map[string]any{"pr_number": p.PR.Number}}, nil
 	}
 
-	severity, title := parseCRBody(p.Comment.Body)
+	parsed := parseCRBody(p.Comment.Body)
 
 	var linePG pgtype.Int4
 	if p.Comment.Line > 0 {
@@ -436,8 +452,11 @@ func (h *WebhookHandler) handleReviewComment(ctx context.Context, payload map[st
 		FilePath:       p.Comment.Path,
 		Line:           linePG,
 		Side:           sidePG,
-		Severity:       severity,
-		Title:          title,
+		Severity:       parsed.Severity,
+		SeverityBadge:  parsed.SeverityBadge,
+		EffortBadge:    parsed.EffortBadge,
+		AiPrompt:       parsed.AIPrompt,
+		Title:          parsed.Title,
 		Body:           p.Comment.Body,
 		Url:            p.Comment.HTMLURL,
 		AuthorLogin:    p.Comment.User.Login,
@@ -445,6 +464,58 @@ func (h *WebhookHandler) handleReviewComment(ctx context.Context, payload map[st
 	row, err := h.Queries.UpsertReviewThread(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("upsert review thread: %w", err)
+	}
+
+	// Mirror the thread into the comments timeline as a first-class
+	// cr_review_comment row so the issue page renders one entry per CR
+	// finding alongside human comments. Idempotent on review_thread_id.
+	commentBody := renderCRComment(row, parsed)
+	mirrored, cerr := h.Queries.UpsertCRReviewComment(ctx, db.UpsertCRReviewCommentParams{
+		IssueID:        pgtype.UUID{Bytes: issue.ID.Bytes, Valid: true},
+		WorkspaceID:    pgtype.UUID{Bytes: issue.WorkspaceID.Bytes, Valid: true},
+		Content:        commentBody,
+		ReviewThreadID: pgtype.UUID{Bytes: row.ID.Bytes, Valid: true},
+	})
+	if cerr != nil {
+		// Comment-mirror is best-effort: log and continue. The thread
+		// row is already saved; the UI's CR panel will show it via
+		// /api/issues/{id}/review-threads even if the timeline mirror
+		// fails. Future re-deliveries of the same comment heal the gap.
+		slog.Warn("webhook: cr_review_comment mirror failed",
+			"issue", uuidStr(issue.ID),
+			"thread", uuidStr(row.ID),
+			"error", cerr,
+		)
+	} else {
+		// Publish a comment:created event so the frontend's timeline
+		// + review-threads queries invalidate in real time. Without
+		// this, the UI shows the new finding only on next refetch
+		// (a TanStack staleTime tick or manual refresh).
+		h.publishCRReviewCommentCreated(issue, mirrored, row)
+	}
+
+	// Re-evaluate status: per-comment ingest is the only signal that drives
+	// `coderabbit → resolving` for COMMENTED reviews (decideReview's APPROVED
+	// gate no longer flips on the racing review event). predicate() must be
+	// called AFTER the upsert above so the count reflects the new row — do
+	// not hoist this above UpsertReviewThread.
+	noOpenChanges, noUnresolved, unresolvedCount, perr := h.predicate(ctx, binding, p.PR.Number, issue.ID)
+	if perr == nil {
+		dec := Decide(Input{
+			Kind:                       EventKindReviewThread,
+			IssueStatus:                issue.Status,
+			NoOpenCRChangesRequest:     noOpenChanges,
+			NoUnresolvedCRThreads:      noUnresolved,
+			LocalUnresolvedThreadCount: unresolvedCount,
+		})
+		if dec.Action != ActionNoop {
+			return h.applyDecision(ctx, issue, dec, p.PR, binding, "pull_request_review_comment")
+		}
+	} else {
+		slog.Warn("webhook: review comment predicate failed",
+			"issue", uuidStr(issue.ID),
+			"error", perr,
+		)
 	}
 
 	return &dispatchResult{
@@ -458,51 +529,208 @@ func (h *WebhookHandler) handleReviewComment(ctx context.Context, payload map[st
 	}, nil
 }
 
-// parseCRBody extracts a severity tag and a one-line title from a CodeRabbit
-// review-comment body. CR prefixes its comments with markers like:
-//   _⚠️ Potential issue_
-//   _🛠️ Refactor suggestion_
-//   _🧹 Nitpick_
-//   _💡 Verification agent_
-// We map the first matching marker to a normalized severity. The title is
-// the first non-empty, non-marker line, trimmed to ~140 chars.
-func parseCRBody(body string) (severity, title string) {
-	lower := strings.ToLower(body)
-	switch {
-	case strings.Contains(lower, "potential issue"):
-		severity = "issue"
-	case strings.Contains(lower, "refactor suggestion"), strings.Contains(lower, "refactor:"):
-		severity = "refactor"
-	case strings.Contains(lower, "nitpick"), strings.Contains(lower, "nit:"):
-		severity = "nitpick"
-	case strings.Contains(lower, "suggestion"):
-		severity = "suggestion"
-	default:
-		severity = "unknown"
+// renderCRComment formats a CodeRabbit review-thread row as a markdown
+// comment body suitable for the issue timeline. The format is
+// intentionally compact — badges as bold-italic chips on the first line,
+// the parsed title (or fallback to the thread.title), the file:line
+// reference, and the AI prompt under a collapsible details block. The
+// raw CR body is NOT inlined; users can deep-link to the GitHub thread
+// for the full payload (analysis, tools, patches).
+func renderCRComment(t db.IssueReviewThread, p crParsed) string {
+	var b strings.Builder
+	// Badge chips (one per non-unknown field).
+	chips := []string{}
+	if p.Severity != "" && p.Severity != "unknown" {
+		chips = append(chips, "**"+strings.Title(p.Severity)+"**") //nolint:staticcheck // Title is fine for ASCII labels
 	}
+	if p.SeverityBadge != "" && p.SeverityBadge != "unknown" {
+		chips = append(chips, "**"+p.SeverityBadge+"**")
+	}
+	if p.EffortBadge != "" && p.EffortBadge != "unknown" {
+		chips = append(chips, "_"+p.EffortBadge+"_")
+	}
+	if len(chips) > 0 {
+		b.WriteString(strings.Join(chips, " · "))
+		b.WriteString("\n\n")
+	}
+	title := p.Title
+	if title == "" {
+		title = t.Title
+	}
+	if title != "" {
+		b.WriteString("**" + title + "**\n\n")
+	}
+	if t.FilePath != "" {
+		ref := t.FilePath
+		if t.Line.Valid && t.Line.Int32 > 0 {
+			ref = fmt.Sprintf("%s:L%d", t.FilePath, t.Line.Int32)
+		}
+		if t.Url != "" {
+			b.WriteString(fmt.Sprintf("[`%s`](%s)\n\n", ref, t.Url))
+		} else {
+			b.WriteString("`" + ref + "`\n\n")
+		}
+	}
+	if p.AIPrompt != "" {
+		b.WriteString("<details>\n<summary>🤖 Prompt for AI Agents</summary>\n\n```\n")
+		b.WriteString(p.AIPrompt)
+		b.WriteString("\n```\n\n</details>\n")
+	}
+	return b.String()
+}
 
+// crParsed captures the structured fields we extract from a CodeRabbit
+// review-comment body. Fields default to "unknown" / "" when absent so
+// downstream code never has to nil-check.
+type crParsed struct {
+	Severity      string // issue | refactor | nitpick | suggestion | unknown
+	SeverityBadge string // Critical | Major | Minor | Trivial | Blocker | unknown
+	EffortBadge   string // Quick win | Heavy lift | Poor tradeoff | Low value | unknown
+	Title         string // first **bold** line, ~140 chars
+	AIPrompt      string // verbatim contents of the fenced block under "🤖 Prompt for AI Agents"
+}
+
+// parseCRBody extracts the structured fields from a CodeRabbit review-comment
+// body. CR's standard layout (2026 format):
+//
+//	_<severity_emoji> <severity_text>_ | _<severity_badge_emoji> <text>_ | _<effort_badge_emoji> <text>_
+//
+//	**<title>.**
+//
+//	<body description...>
+//
+//	<details>
+//	<summary>🤖 Prompt for AI Agents</summary>
+//
+//	```
+//	<verbatim AI prompt>
+//	```
+//
+//	</details>
+//
+// The third badge (effort) is optional. Fields are case-insensitive against
+// CR's vocabulary; the canonical written form is preserved (e.g. "Major"
+// not "major") so the UI renders consistently.
+func parseCRBody(body string) crParsed {
+	out := crParsed{Severity: "unknown", SeverityBadge: "unknown", EffortBadge: "unknown"}
+
+	// 1. Badges: first non-empty line, pipe-separated underscore-italics.
 	for _, raw := range strings.Split(body, "\n") {
 		line := strings.TrimSpace(raw)
 		if line == "" {
 			continue
 		}
-		// Skip CR's italic-marker line (starts and ends with underscore).
-		if strings.HasPrefix(line, "_") && strings.HasSuffix(line, "_") {
+		// Must look like a badge line.
+		if !crBadgeLineRE.MatchString(line) {
+			break
+		}
+		for _, seg := range strings.Split(line, "|") {
+			tag := strings.Trim(strings.TrimSpace(seg), "_")
+			if tag == "" {
+				continue
+			}
+			lower := strings.ToLower(tag)
+			switch {
+			case strings.Contains(lower, "potential issue"):
+				out.Severity = "issue"
+			case strings.Contains(lower, "refactor suggestion"), strings.Contains(lower, "refactor:"):
+				out.Severity = "refactor"
+			case strings.Contains(lower, "nitpick"), strings.Contains(lower, "nit:"):
+				out.Severity = "nitpick"
+			case strings.Contains(lower, "verification agent"):
+				out.Severity = "suggestion"
+			case strings.Contains(lower, "suggestion"):
+				if out.Severity == "unknown" {
+					out.Severity = "suggestion"
+				}
+			}
+			switch {
+			case strings.Contains(lower, "critical"):
+				out.SeverityBadge = "Critical"
+			case strings.Contains(lower, "blocker"):
+				out.SeverityBadge = "Blocker"
+			case strings.Contains(lower, "major"):
+				out.SeverityBadge = "Major"
+			case strings.Contains(lower, "minor"):
+				out.SeverityBadge = "Minor"
+			case strings.Contains(lower, "trivial"):
+				out.SeverityBadge = "Trivial"
+			}
+			switch {
+			case strings.Contains(lower, "quick win"):
+				out.EffortBadge = "Quick win"
+			case strings.Contains(lower, "heavy lift"):
+				out.EffortBadge = "Heavy lift"
+			case strings.Contains(lower, "poor tradeoff"):
+				out.EffortBadge = "Poor tradeoff"
+			case strings.Contains(lower, "low value"):
+				out.EffortBadge = "Low value"
+			}
+		}
+		break
+	}
+
+	// 2. Title: first **bold** line outside any <details> block, with a
+	// non-empty/non-badge fallback. CR often wraps an "Analysis chain" or
+	// "Tools" section in <details> ahead of the actual title — we walk
+	// those skip-blocks rather than picking up `<details>` as the heading.
+	depth := 0
+	for _, raw := range strings.Split(body, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
 			continue
 		}
-		// Strip leading markdown header / list markers for cleaner titles.
+		if strings.HasPrefix(line, "<details") {
+			depth++
+			continue
+		}
+		if strings.HasPrefix(line, "</details") {
+			if depth > 0 {
+				depth--
+			}
+			continue
+		}
+		if depth > 0 {
+			continue
+		}
+		if crBadgeLineRE.MatchString(line) {
+			continue
+		}
+		if m := crBoldTitleRE.FindStringSubmatch(line); m != nil {
+			out.Title = strings.TrimSpace(m[1])
+			break
+		}
 		line = strings.TrimLeft(line, "#*-> \t")
 		if line == "" {
 			continue
 		}
-		title = line
+		out.Title = line
 		break
 	}
-	if len(title) > 140 {
-		title = title[:140]
+	if len(out.Title) > 140 {
+		out.Title = out.Title[:140]
 	}
-	return severity, title
+
+	// 3. AI prompt: fenced block inside the AI-agents <details>.
+	if m := crAIPromptRE.FindStringSubmatch(body); m != nil {
+		out.AIPrompt = strings.TrimSpace(m[1])
+	}
+
+	return out
 }
+
+var (
+	// Underscore-italic segments separated by pipes:
+	//   _⚠️ Potential issue_ | _🟠 Major_ | _⚡ Quick win_
+	crBadgeLineRE = regexp.MustCompile(`^_[^_\n]+_(\s*\|\s*_[^_\n]+_)*\s*$`)
+
+	// **Title text.**  (with optional trailing punctuation captured)
+	crBoldTitleRE = regexp.MustCompile(`^\*\*(.+?)\*\*\s*$`)
+
+	// <details><summary>🤖 Prompt for AI Agents</summary> ... ```<content>``` ... </details>
+	// Non-greedy across newlines (?s flag); capture group is the fenced body.
+	crAIPromptRE = regexp.MustCompile("(?s)<summary>\\s*🤖\\s*Prompt for AI Agents\\s*</summary>.*?```[a-zA-Z]*\\n(.*?)\\n```")
+)
 
 // ---------------------------------------------------------------------------
 // Issue resolution
@@ -705,6 +933,73 @@ func (h *WebhookHandler) predicate(ctx context.Context, binding db.WorkspaceRepo
 	return noOpenChanges, noUnresolved, unresolvedCount, nil
 }
 
+// bulkMirrorReviewComments fetches the inline comments belonging to a single
+// CR review submission and upserts each into issue_review_thread. It runs
+// before predicate() in handleReview so LocalUnresolvedThreadCount reflects
+// the full set of findings rather than the racing count seen at the moment
+// the review webhook arrives.
+//
+// Skips non-CR-authored comments defensively even though the endpoint is
+// scoped to a single review (CR's review can technically only contain its
+// own author's comments, but we filter anyway to keep the local mirror's
+// invariant — only CR threads — explicit).
+//
+// Does NOT mirror into cr_review_comment (the timeline) or publish bus
+// events; that work stays in handleReviewComment so we don't double-publish
+// when the per-comment webhooks arrive afterward.
+func (h *WebhookHandler) bulkMirrorReviewComments(ctx context.Context, binding db.WorkspaceRepoBinding, issue db.Issue, prNumber int32, reviewID int64) error {
+	owner, repo, ok := splitRepo(binding.RepoFullName)
+	if !ok {
+		return fmt.Errorf("invalid repo: %s", binding.RepoFullName)
+	}
+	var c PRReviewClient
+	if h.NewClient != nil {
+		c = h.NewClient(binding.InstallationID)
+	} else {
+		c = NewGitHubAPIClient(h.Auth, binding.InstallationID)
+	}
+	comments, err := c.ListReviewComments(ctx, owner, repo, int(prNumber), reviewID)
+	if err != nil {
+		return fmt.Errorf("list review comments: %w", err)
+	}
+	for _, cm := range comments {
+		if !strings.EqualFold(cm.User.Login, binding.CrBotUsername) {
+			continue
+		}
+		parsed := parseCRBody(cm.Body)
+		var linePG pgtype.Int4
+		if cm.Line > 0 {
+			linePG = pgtypeInt4(int32(cm.Line))
+		}
+		var sidePG pgtype.Text
+		if cm.Side != "" {
+			sidePG = pgtypeText(cm.Side)
+		}
+		if _, uerr := h.Queries.UpsertReviewThread(ctx, db.UpsertReviewThreadParams{
+			WorkspaceID:    pgtype.UUID{Bytes: issue.WorkspaceID.Bytes, Valid: true},
+			IssueID:        pgtype.UUID{Bytes: issue.ID.Bytes, Valid: true},
+			PrRepo:         binding.RepoFullName,
+			PrNumber:       prNumber,
+			GhCommentID:    cm.ID,
+			GhThreadNodeID: pgtype.Text{Valid: false}, // populated later from review_thread payloads
+			FilePath:       cm.Path,
+			Line:           linePG,
+			Side:           sidePG,
+			Severity:       parsed.Severity,
+			SeverityBadge:  parsed.SeverityBadge,
+			EffortBadge:    parsed.EffortBadge,
+			AiPrompt:       parsed.AIPrompt,
+			Title:          parsed.Title,
+			Body:           cm.Body,
+			Url:            cm.HTMLURL,
+			AuthorLogin:    cm.User.Login,
+		}); uerr != nil {
+			return fmt.Errorf("upsert review thread (gh_comment_id=%d): %w", cm.ID, uerr)
+		}
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -895,6 +1190,55 @@ func uuidStr(u pgtype.UUID) string {
 // for streaming payloads.
 var _ = bytes.NewReader
 var _ = io.Discard
+
+// publishCRReviewCommentCreated emits a comment:created bus event so the
+// frontend's WS handler invalidates the timeline + review-threads queries
+// the moment a CR finding lands. Without this, the new finding only surfaces
+// on the next stale-time tick or a manual refresh.
+//
+// Payload shape mirrors internal/handler.commentToResponse output JSON tags
+// (we can't import that struct without creating a circular dep).
+func (h *WebhookHandler) publishCRReviewCommentCreated(issue db.Issue, mirrored db.Comment, thread db.IssueReviewThread) {
+	if h.Bus == nil {
+		return
+	}
+	wsID := uuidStr(issue.WorkspaceID)
+	commentPayload := map[string]any{
+		"id":               uuidStr(mirrored.ID),
+		"issue_id":         uuidStr(mirrored.IssueID),
+		"author_type":      mirrored.AuthorType,
+		"author_id":        uuidStrOrEmpty(mirrored.AuthorID),
+		"content":          mirrored.Content,
+		"type":             mirrored.Type,
+		"parent_id":        nil,
+		"review_thread_id": uuidStr(thread.ID),
+		"created_at":       mirrored.CreatedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z"),
+		"updated_at":       mirrored.UpdatedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z"),
+		"reactions":        []any{},
+		"attachments":      []any{},
+	}
+	h.Bus.Publish(events.Event{
+		Type:        protocol.EventCommentCreated,
+		WorkspaceID: wsID,
+		ActorType:   "system",
+		Payload: map[string]any{
+			"comment":       commentPayload,
+			"issue_title":   issue.Title,
+			"issue_status":  issue.Status,
+			"source":        "github_webhook",
+			"src_event":     "pull_request_review_comment",
+		},
+	})
+}
+
+// uuidStrOrEmpty returns "" for an invalid UUID; helps when a column is
+// nullable and we want a JSON null rather than a zero string.
+func uuidStrOrEmpty(u pgtype.UUID) any {
+	if !u.Valid {
+		return nil
+	}
+	return uuidStr(u)
+}
 
 // buildIssueResponse constructs a payload matching internal/handler.IssueResponse
 // JSON shape. Defined locally (not imported) to avoid a circular dependency

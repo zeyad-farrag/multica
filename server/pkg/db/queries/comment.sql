@@ -37,6 +37,47 @@ INSERT INTO comment (issue_id, workspace_id, author_type, author_id, content, ty
 VALUES ($1, $2, $3, $4, $5, $6, sqlc.narg(parent_id))
 RETURNING *;
 
+-- name: UpsertCRReviewComment :one
+-- Idempotent insert/update of a CodeRabbit review comment as a first-class
+-- timeline entry. Keyed on review_thread_id so re-deliveries of the same
+-- pull_request_review_comment.created/edited webhook update content in
+-- place rather than creating duplicates.
+INSERT INTO comment (
+    issue_id, workspace_id, author_type, author_id, content, type, review_thread_id
+) VALUES (
+    $1, $2, 'system', NULL, $3, 'cr_review_comment', $4
+)
+ON CONFLICT (review_thread_id)
+WHERE review_thread_id IS NOT NULL
+DO UPDATE SET
+    content    = EXCLUDED.content,
+    updated_at = now()
+RETURNING *;
+
+-- name: MarkFixerReplyPosted :one
+-- Stamp posted_to_github_at on a fixer_reply row after Marcus successfully
+-- mirrors it to GitHub via the review-threads/{id}/reply endpoint. Idempotent:
+-- a second call returns the row with its existing timestamp unchanged.
+UPDATE comment SET
+    posted_to_github_at = COALESCE(posted_to_github_at, now()),
+    updated_at          = now()
+WHERE id = $1 AND type = 'fixer_reply'
+RETURNING *;
+
+-- name: ListFixerRepliesForThread :many
+-- Returns Rosa's queued fixer_reply rows for a single review thread, oldest
+-- first. Joins through the parent cr_review_comment row so we resolve via
+-- parent_id (the UI's nesting key) rather than duplicating review_thread_id
+-- onto every reply. Marcus's bmad-pr-resolve skill walks these rows,
+-- posts each content verbatim to GitHub, and resolves the thread.
+SELECT c.id, c.issue_id, c.author_type, c.author_id, c.content, c.type, c.created_at, c.updated_at, c.parent_id, c.workspace_id, c.review_thread_id
+FROM comment c
+JOIN comment p ON c.parent_id = p.id
+WHERE p.review_thread_id = $1
+  AND p.type = 'cr_review_comment'
+  AND c.type = 'fixer_reply'
+ORDER BY c.created_at ASC;
+
 -- name: UpdateComment :one
 UPDATE comment SET
     content = $2,

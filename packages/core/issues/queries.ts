@@ -18,6 +18,7 @@ export const issueKeys = {
   childProgress: (wsId: string) =>
     [...issueKeys.all(wsId), "child-progress"] as const,
   timeline: (issueId: string) => ["issues", "timeline", issueId] as const,
+  reviewThreads: (issueId: string) => ["issues", "review-threads", issueId] as const,
   reactions: (issueId: string) => ["issues", "reactions", issueId] as const,
   subscribers: (issueId: string) =>
     ["issues", "subscribers", issueId] as const,
@@ -124,6 +125,13 @@ export function issueTimelineOptions(issueId: string) {
   return queryOptions({
     queryKey: issueKeys.timeline(issueId),
     queryFn: () => api.listTimeline(issueId),
+  });
+}
+
+export function issueReviewThreadsOptions(issueId: string) {
+  return queryOptions({
+    queryKey: issueKeys.reviewThreads(issueId),
+    queryFn: () => api.listReviewThreads(issueId),
   });
 }
 

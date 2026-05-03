@@ -25,12 +25,14 @@ type TimelineEntry struct {
 	Details json.RawMessage `json:"details,omitempty"`
 
 	// Comment-only fields
-	Content     *string              `json:"content,omitempty"`
-	ParentID    *string              `json:"parent_id,omitempty"`
-	UpdatedAt   *string              `json:"updated_at,omitempty"`
-	CommentType *string              `json:"comment_type,omitempty"`
-	Reactions   []ReactionResponse   `json:"reactions,omitempty"`
-	Attachments []AttachmentResponse `json:"attachments,omitempty"`
+	Content          *string              `json:"content,omitempty"`
+	ParentID         *string              `json:"parent_id,omitempty"`
+	UpdatedAt        *string              `json:"updated_at,omitempty"`
+	CommentType      *string              `json:"comment_type,omitempty"`
+	ReviewThreadID   *string              `json:"review_thread_id,omitempty"`
+	PostedToGithubAt *string              `json:"posted_to_github_at,omitempty"`
+	Reactions        []ReactionResponse   `json:"reactions,omitempty"`
+	Attachments      []AttachmentResponse `json:"attachments,omitempty"`
 }
 
 // ListTimeline returns a merged, chronologically-sorted timeline of activities
@@ -93,19 +95,25 @@ func (h *Handler) ListTimeline(w http.ResponseWriter, r *http.Request) {
 		commentType := c.Type
 		updatedAt := timestampToString(c.UpdatedAt)
 		cid := uuidToString(c.ID)
-		timeline = append(timeline, TimelineEntry{
-			Type:        "comment",
-			ID:          cid,
-			ActorType:   c.AuthorType,
-			ActorID:     uuidToString(c.AuthorID),
-			Content:     &content,
-			CommentType: &commentType,
-			ParentID:    uuidToPtr(c.ParentID),
-			CreatedAt:   timestampToString(c.CreatedAt),
-			UpdatedAt:   &updatedAt,
-			Reactions:   grouped[cid],
-			Attachments: groupedAtt[cid],
-		})
+		entry := TimelineEntry{
+			Type:           "comment",
+			ID:             cid,
+			ActorType:      c.AuthorType,
+			ActorID:        uuidToString(c.AuthorID),
+			Content:        &content,
+			CommentType:    &commentType,
+			ParentID:       uuidToPtr(c.ParentID),
+			ReviewThreadID: uuidToPtr(c.ReviewThreadID),
+			CreatedAt:      timestampToString(c.CreatedAt),
+			UpdatedAt:      &updatedAt,
+			Reactions:      grouped[cid],
+			Attachments:    groupedAtt[cid],
+		}
+		if c.PostedToGithubAt.Valid {
+			s := timestampToString(c.PostedToGithubAt)
+			entry.PostedToGithubAt = &s
+		}
+		timeline = append(timeline, entry)
 	}
 
 	// Sort chronologically (ascending by created_at)

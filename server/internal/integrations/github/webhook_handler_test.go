@@ -124,8 +124,9 @@ func TestSplitRepoInvalid(t *testing.T) {
 // ----------------------------- Predicate -----------------------------
 
 type fakePredicateClient struct {
-	reviews []Review
-	threads []ReviewThread
+	reviews        []Review
+	threads        []ReviewThread
+	reviewComments map[int64][]ReviewComment // keyed by review ID
 }
 
 func (f fakePredicateClient) ListReviews(_ context.Context, _, _ string, _ int) ([]Review, error) {
@@ -133,6 +134,9 @@ func (f fakePredicateClient) ListReviews(_ context.Context, _, _ string, _ int) 
 }
 func (f fakePredicateClient) ListReviewThreads(_ context.Context, _, _ string, _ int) ([]ReviewThread, error) {
 	return f.threads, nil
+}
+func (f fakePredicateClient) ListReviewComments(_ context.Context, _, _ string, _ int, reviewID int64) ([]ReviewComment, error) {
+	return f.reviewComments[reviewID], nil
 }
 
 func newReview(login, state string) Review {

@@ -467,6 +467,14 @@ export class ApiClient {
     return this.fetch(`/api/issues/${issueId}/timeline`);
   }
 
+  async listReviewThreads(
+    issueId: string,
+    params?: { state?: "unresolved" },
+  ): Promise<import("../types/review-thread").ListReviewThreadsResponse> {
+    const qs = params?.state ? `?state=${params.state}` : "";
+    return this.fetch(`/api/issues/${issueId}/review-threads${qs}`);
+  }
+
   async getAssigneeFrequency(): Promise<AssigneeFrequencyEntry[]> {
     return this.fetch("/api/assignee-frequency");
   }

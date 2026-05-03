@@ -35,7 +35,7 @@ import (
 //     Manager, plus any future or non-BMAD agents) are blocked from direct
 //     status flips with NO exemptions. Every agent transition flows through
 //     a marker comment that the sidecar parses (including the post-merge
-//     no-op short-circuit, which now uses `<!-- post-merge-noop v1 -->`
+//     no-op short-circuit, which now uses `<!-- post-merge-noop -->`
 //     instead of the legacy `bmad-agent-dev → staged` direct-flip
 //     exemption that was retired in this commit).
 //   * `CreateIssue` always lands new cards in `backlog`, regardless of the
@@ -109,11 +109,11 @@ func statusFlipForbiddenMessage(actorType, actorName, prev, next string) string 
 		return fmt.Sprintf(
 			"agent %q is forbidden from flipping status directly (`%s -> %s`). "+
 				"Status transitions are owned by the BMAD sidecar, which parses "+
-				"contract markers in your comments (`<!-- claim v1 -->`, "+
-				"`<!-- impl-plan v1 -->`, `<!-- completion-note v1 -->`, "+
-				"`<!-- review-findings v1 -->`, `<!-- fix-note v1 -->`, "+
-				"`<!-- plan-issue v1 -->`, `<!-- pr-opened v1 -->`, "+
-				"`<!-- post-merge-noop v1 -->`) and routes the card. Drop the "+
+				"contract markers in your comments (`<!-- claim -->`, "+
+				"`<!-- impl-plan -->`, `<!-- completion-note -->`, "+
+				"`<!-- review-findings -->`, `<!-- fix-note -->`, "+
+				"`<!-- plan-issue -->`, `<!-- pr-opened -->`, "+
+				"`<!-- post-merge-noop -->`) and routes the card. Drop the "+
 				"`multica issue status` call and post your marker comment instead.",
 			actorName, prev, next)
 	default:

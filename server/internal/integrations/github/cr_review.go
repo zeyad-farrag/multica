@@ -28,6 +28,12 @@ import (
 type PRReviewClient interface {
 	ListReviews(ctx context.Context, owner, repo string, number int) ([]Review, error)
 	ListReviewThreads(ctx context.Context, owner, repo string, number int) ([]ReviewThread, error)
+	// ListReviewComments returns the inline comments belonging to a single
+	// review submission. Used by handleReview to bulk-mirror CR's findings
+	// before flipping the issue to `resolving`, so the state-machine
+	// transition reflects the full set rather than racing the per-comment
+	// webhooks.
+	ListReviewComments(ctx context.Context, owner, repo string, prNumber int, reviewID int64) ([]ReviewComment, error)
 }
 
 // Review is the subset of /repos/{o}/{r}/pulls/{n}/reviews we use.
@@ -45,6 +51,22 @@ type Review struct {
 type ReviewThread struct {
 	IsResolved bool   `json:"isResolved"`
 	Author     string `json:"author"` // login of the thread initiator
+}
+
+// ReviewComment is the subset of /repos/{o}/{r}/pulls/{n}/reviews/{id}/comments
+// that handleReview needs to bulk-mirror inline findings into
+// issue_review_thread.
+type ReviewComment struct {
+	ID                  int64  `json:"id"`
+	PullRequestReviewID int64  `json:"pull_request_review_id"`
+	Path                string `json:"path"`
+	Line                int    `json:"line"`
+	Side                string `json:"side"`
+	Body                string `json:"body"`
+	HTMLURL             string `json:"html_url"`
+	User                struct {
+		Login string `json:"login"`
+	} `json:"user"`
 }
 
 // EvaluatePredicate returns (NoOpenCRChangesRequest, NoUnresolvedCRThreads)
@@ -150,6 +172,23 @@ func (c *GitHubAPIClient) ListReviews(ctx context.Context, owner, repo string, n
 		return nil, err
 	}
 	return reviews, nil
+}
+
+// ListReviewComments returns the inline comments belonging to a single
+// review submission. The REST endpoint is the canonical answer to
+// "what's in this review" — we use it at pull_request_review.submitted
+// time to mirror all findings before deciding the next status, closing
+// the race against the per-comment webhooks (which arrive after the
+// review summary). Pagination capped at per_page=100; CR reviews above
+// that are unheard of in practice.
+func (c *GitHubAPIClient) ListReviewComments(ctx context.Context, owner, repo string, prNumber int, reviewID int64) ([]ReviewComment, error) {
+	u := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/reviews/%d/comments?per_page=100",
+		url.PathEscape(owner), url.PathEscape(repo), prNumber, reviewID)
+	var out []ReviewComment
+	if err := c.doJSON(ctx, http.MethodGet, u, nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ListReviewThreads uses the GraphQL API since REST does not expose

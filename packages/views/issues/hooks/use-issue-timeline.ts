@@ -75,6 +75,13 @@ export function useIssueTimeline(issueId: string, userId?: string) {
             );
           },
         );
+        // CR-finding ingest: also invalidate the review-threads query so
+        // the findings strip and any per-thread UI redraws with the fresh
+        // unresolved-count + severity bucketing. Webhook landing time is
+        // the only event that grows or shrinks this list.
+        if (comment.type === "cr_review_comment") {
+          qc.invalidateQueries({ queryKey: issueKeys.reviewThreads(issueId) });
+        }
       },
       [qc, issueId],
     ),
@@ -151,6 +158,27 @@ export function useIssueTimeline(issueId: string, userId?: string) {
             );
           },
         );
+      },
+      [qc, issueId],
+    ),
+  );
+
+  useWSEvent(
+    "issue:updated",
+    useCallback(
+      (payload: unknown) => {
+        const p = payload as { id?: string; src_event?: string };
+        if (p.id !== issueId) return;
+        // Webhook-driven issue updates that originate from a CR review or
+        // review-thread event change the issue_review_thread state column
+        // (state flips between unresolved/resolved as Marcus walks the
+        // threads). Invalidate so the findings strip re-counts.
+        if (
+          p.src_event === "pull_request_review_thread" ||
+          p.src_event === "pull_request_review"
+        ) {
+          qc.invalidateQueries({ queryKey: issueKeys.reviewThreads(issueId) });
+        }
       },
       [qc, issueId],
     ),

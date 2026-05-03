@@ -18,17 +18,19 @@ import (
 )
 
 type CommentResponse struct {
-	ID          string               `json:"id"`
-	IssueID     string               `json:"issue_id"`
-	AuthorType  string               `json:"author_type"`
-	AuthorID    string               `json:"author_id"`
-	Content     string               `json:"content"`
-	Type        string               `json:"type"`
-	ParentID    *string              `json:"parent_id"`
-	CreatedAt   string               `json:"created_at"`
-	UpdatedAt   string               `json:"updated_at"`
-	Reactions   []ReactionResponse   `json:"reactions"`
-	Attachments []AttachmentResponse `json:"attachments"`
+	ID                string               `json:"id"`
+	IssueID           string               `json:"issue_id"`
+	AuthorType        string               `json:"author_type"`
+	AuthorID          string               `json:"author_id"`
+	Content           string               `json:"content"`
+	Type              string               `json:"type"`
+	ParentID          *string              `json:"parent_id"`
+	ReviewThreadID    *string              `json:"review_thread_id,omitempty"`
+	PostedToGithubAt  *string              `json:"posted_to_github_at,omitempty"`
+	CreatedAt         string               `json:"created_at"`
+	UpdatedAt         string               `json:"updated_at"`
+	Reactions         []ReactionResponse   `json:"reactions"`
+	Attachments       []AttachmentResponse `json:"attachments"`
 }
 
 func commentToResponse(c db.Comment, reactions []ReactionResponse, attachments []AttachmentResponse) CommentResponse {
@@ -38,19 +40,25 @@ func commentToResponse(c db.Comment, reactions []ReactionResponse, attachments [
 	if attachments == nil {
 		attachments = []AttachmentResponse{}
 	}
-	return CommentResponse{
-		ID:          uuidToString(c.ID),
-		IssueID:     uuidToString(c.IssueID),
-		AuthorType:  c.AuthorType,
-		AuthorID:    uuidToString(c.AuthorID),
-		Content:     c.Content,
-		Type:        c.Type,
-		ParentID:    uuidToPtr(c.ParentID),
-		CreatedAt:   timestampToString(c.CreatedAt),
-		UpdatedAt:   timestampToString(c.UpdatedAt),
-		Reactions:   reactions,
-		Attachments: attachments,
+	resp := CommentResponse{
+		ID:             uuidToString(c.ID),
+		IssueID:        uuidToString(c.IssueID),
+		AuthorType:     c.AuthorType,
+		AuthorID:       uuidToString(c.AuthorID),
+		Content:        c.Content,
+		Type:           c.Type,
+		ParentID:       uuidToPtr(c.ParentID),
+		ReviewThreadID: uuidToPtr(c.ReviewThreadID),
+		CreatedAt:      timestampToString(c.CreatedAt),
+		UpdatedAt:      timestampToString(c.UpdatedAt),
+		Reactions:      reactions,
+		Attachments:    attachments,
 	}
+	if c.PostedToGithubAt.Valid {
+		s := timestampToString(c.PostedToGithubAt)
+		resp.PostedToGithubAt = &s
+	}
+	return resp
 }
 
 func (h *Handler) ListComments(w http.ResponseWriter, r *http.Request) {
@@ -214,6 +222,64 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 
 	// Determine author identity: agent (via X-Agent-ID header) or member.
 	authorType, authorID := h.resolveActor(r, userID, uuidToString(issue.WorkspaceID))
+
+	// Type-based write guards. The comment.type CHECK constraint accepts
+	// many values for forward compatibility, but only a subset are legitimately
+	// written through the user-facing /comments endpoint. Reject the rest so
+	// a stolen/scoped agent token can't spoof a CR finding or a system event.
+	//
+	//   cr_review_comment — written ONLY by the GitHub webhook handler's
+	//     UpsertCRReviewComment query (one row per issue_review_thread).
+	//     A user-API write here would let anyone fabricate a CR review
+	//     comment in the timeline.
+	//   fixer_reply — written by Rosa per CR thread, with strict parent
+	//     invariants (see below).
+	//   system / status_change / progress_update / debug / impl_plan /
+	//     completion_note / change_log / review — reserved type names. No
+	//     current code path writes these via the user API; reject so they
+	//     stay reserved.
+	//
+	//   comment — the only type freely writable by members and agents.
+	switch req.Type {
+	case "comment":
+		// allowed
+	case "cr_review_comment":
+		writeError(w, http.StatusForbidden,
+			"cr_review_comment rows are written only by the GitHub webhook")
+		return
+	case "fixer_reply":
+		// Invariants:
+		//  (a) author must be an agent (Rosa)
+		//  (b) parent_id must be set
+		//  (c) parent must be type='cr_review_comment'
+		//  (d) parent must have a non-null review_thread_id
+		if authorType != "agent" {
+			writeError(w, http.StatusForbidden,
+				"fixer_reply requires an agent author")
+			return
+		}
+		if parentComment == nil {
+			writeError(w, http.StatusBadRequest,
+				"fixer_reply requires parent_id pointing to a cr_review_comment")
+			return
+		}
+		if parentComment.Type != "cr_review_comment" {
+			writeError(w, http.StatusBadRequest,
+				"fixer_reply parent must be type=cr_review_comment (got "+parentComment.Type+")")
+			return
+		}
+		if !parentComment.ReviewThreadID.Valid {
+			writeError(w, http.StatusBadRequest,
+				"fixer_reply parent has no review_thread_id; refusing to drop reply")
+			return
+		}
+	default:
+		// Reserved types: system, status_change, progress_update, debug,
+		// impl_plan, completion_note, change_log, review.
+		writeError(w, http.StatusForbidden,
+			"comment type "+req.Type+" is reserved and not writable via this endpoint")
+		return
+	}
 
 	// Defense against resumed-session drift: when an agent posts from inside a
 	// comment-triggered task AND the comment is being posted on that same

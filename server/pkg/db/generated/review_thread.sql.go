@@ -45,7 +45,7 @@ func (q *Queries) CountUnresolvedReviewThreadsByIssue(ctx context.Context, issue
 }
 
 const getReviewThreadByCommentID = `-- name: GetReviewThreadByCommentID :one
-SELECT id, workspace_id, issue_id, pr_repo, pr_number, gh_comment_id, gh_thread_node_id, file_path, line, side, severity, title, body, url, author_login, state, resolved_by_agent, resolved_at, created_at, updated_at FROM issue_review_thread
+SELECT id, workspace_id, issue_id, pr_repo, pr_number, gh_comment_id, gh_thread_node_id, file_path, line, side, severity, title, body, url, author_login, state, resolved_by_agent, resolved_at, created_at, updated_at, severity_badge, effort_badge, ai_prompt FROM issue_review_thread
 WHERE gh_comment_id = $1
 `
 
@@ -73,12 +73,15 @@ func (q *Queries) GetReviewThreadByCommentID(ctx context.Context, ghCommentID in
 		&i.ResolvedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SeverityBadge,
+		&i.EffortBadge,
+		&i.AiPrompt,
 	)
 	return i, err
 }
 
 const listReviewThreadsByIssue = `-- name: ListReviewThreadsByIssue :many
-SELECT id, workspace_id, issue_id, pr_repo, pr_number, gh_comment_id, gh_thread_node_id, file_path, line, side, severity, title, body, url, author_login, state, resolved_by_agent, resolved_at, created_at, updated_at FROM issue_review_thread
+SELECT id, workspace_id, issue_id, pr_repo, pr_number, gh_comment_id, gh_thread_node_id, file_path, line, side, severity, title, body, url, author_login, state, resolved_by_agent, resolved_at, created_at, updated_at, severity_badge, effort_badge, ai_prompt FROM issue_review_thread
 WHERE issue_id = $1
 ORDER BY created_at ASC
 `
@@ -113,6 +116,77 @@ func (q *Queries) ListReviewThreadsByIssue(ctx context.Context, issueID pgtype.U
 			&i.ResolvedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.SeverityBadge,
+			&i.EffortBadge,
+			&i.AiPrompt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listStuckCoderabbitIssues = `-- name: ListStuckCoderabbitIssues :many
+SELECT
+    i.id          AS issue_id,
+    i.workspace_id,
+    i.title,
+    i.pr_repo,
+    i.pr_number,
+    COUNT(t.*)::int AS unresolved_count,
+    MAX(t.created_at) AS last_cr_comment_at
+FROM issue i
+JOIN issue_review_thread t ON t.issue_id = i.id
+WHERE i.status = 'coderabbit'
+  AND t.state = 'unresolved'
+GROUP BY i.id
+HAVING MAX(t.created_at) < now() - make_interval(secs => $1::int)
+ORDER BY i.id
+`
+
+type ListStuckCoderabbitIssuesRow struct {
+	IssueID         pgtype.UUID `json:"issue_id"`
+	WorkspaceID     pgtype.UUID `json:"workspace_id"`
+	Title           string      `json:"title"`
+	PrRepo          pgtype.Text `json:"pr_repo"`
+	PrNumber        pgtype.Int4 `json:"pr_number"`
+	UnresolvedCount int32       `json:"unresolved_count"`
+	LastCrCommentAt interface{} `json:"last_cr_comment_at"`
+}
+
+// Issues that have been parked in `coderabbit` long enough that we suspect
+// CodeRabbit streamed inline comments without ever submitting a wrapping
+// pull_request_review (rare, but observed on long PRs). The settle-window
+// sweeper runs this on a cadence and forces the coderabbit → resolving
+// transition for any matching issue.
+//
+// Match conditions:
+//  1. issue is currently in `coderabbit`
+//  2. issue has at least one unresolved CR thread
+//  3. the most recent CR thread is at least @settle_seconds old
+//     (we hold off on issues whose CR comments are still landing — the
+//     normal pull_request_review.submitted will fire shortly)
+func (q *Queries) ListStuckCoderabbitIssues(ctx context.Context, settleSeconds int32) ([]ListStuckCoderabbitIssuesRow, error) {
+	rows, err := q.db.Query(ctx, listStuckCoderabbitIssues, settleSeconds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListStuckCoderabbitIssuesRow{}
+	for rows.Next() {
+		var i ListStuckCoderabbitIssuesRow
+		if err := rows.Scan(
+			&i.IssueID,
+			&i.WorkspaceID,
+			&i.Title,
+			&i.PrRepo,
+			&i.PrNumber,
+			&i.UnresolvedCount,
+			&i.LastCrCommentAt,
 		); err != nil {
 			return nil, err
 		}
@@ -125,7 +199,7 @@ func (q *Queries) ListReviewThreadsByIssue(ctx context.Context, issueID pgtype.U
 }
 
 const listUnresolvedReviewThreadsByIssue = `-- name: ListUnresolvedReviewThreadsByIssue :many
-SELECT id, workspace_id, issue_id, pr_repo, pr_number, gh_comment_id, gh_thread_node_id, file_path, line, side, severity, title, body, url, author_login, state, resolved_by_agent, resolved_at, created_at, updated_at FROM issue_review_thread
+SELECT id, workspace_id, issue_id, pr_repo, pr_number, gh_comment_id, gh_thread_node_id, file_path, line, side, severity, title, body, url, author_login, state, resolved_by_agent, resolved_at, created_at, updated_at, severity_badge, effort_badge, ai_prompt FROM issue_review_thread
 WHERE issue_id = $1 AND state = 'unresolved'
 ORDER BY created_at ASC
 `
@@ -160,6 +234,9 @@ func (q *Queries) ListUnresolvedReviewThreadsByIssue(ctx context.Context, issueI
 			&i.ResolvedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.SeverityBadge,
+			&i.EffortBadge,
+			&i.AiPrompt,
 		); err != nil {
 			return nil, err
 		}
@@ -249,24 +326,29 @@ const upsertReviewThread = `-- name: UpsertReviewThread :one
 INSERT INTO issue_review_thread (
     workspace_id, issue_id, pr_repo, pr_number,
     gh_comment_id, gh_thread_node_id,
-    file_path, line, side, severity, title, body, url, author_login
+    file_path, line, side, severity, title, body, url, author_login,
+    severity_badge, effort_badge, ai_prompt
 ) VALUES (
     $1, $2, $3, $4,
-    $5, $12::text,
-    $6, $13::int, $14::text, $7, $8, $9, $10, $11
+    $5, $15::text,
+    $6, $16::int, $17::text, $7, $8, $9, $10, $11,
+    $12, $13, $14
 )
 ON CONFLICT (gh_comment_id) DO UPDATE SET
-    body         = EXCLUDED.body,
-    title        = EXCLUDED.title,
-    severity     = EXCLUDED.severity,
-    url          = EXCLUDED.url,
-    file_path    = EXCLUDED.file_path,
-    line         = EXCLUDED.line,
-    side         = EXCLUDED.side,
-    author_login = EXCLUDED.author_login,
+    body           = EXCLUDED.body,
+    title          = EXCLUDED.title,
+    severity       = EXCLUDED.severity,
+    severity_badge = EXCLUDED.severity_badge,
+    effort_badge   = EXCLUDED.effort_badge,
+    ai_prompt      = EXCLUDED.ai_prompt,
+    url            = EXCLUDED.url,
+    file_path      = EXCLUDED.file_path,
+    line           = EXCLUDED.line,
+    side           = EXCLUDED.side,
+    author_login   = EXCLUDED.author_login,
     gh_thread_node_id = COALESCE(EXCLUDED.gh_thread_node_id, issue_review_thread.gh_thread_node_id),
-    updated_at   = now()
-RETURNING id, workspace_id, issue_id, pr_repo, pr_number, gh_comment_id, gh_thread_node_id, file_path, line, side, severity, title, body, url, author_login, state, resolved_by_agent, resolved_at, created_at, updated_at
+    updated_at     = now()
+RETURNING id, workspace_id, issue_id, pr_repo, pr_number, gh_comment_id, gh_thread_node_id, file_path, line, side, severity, title, body, url, author_login, state, resolved_by_agent, resolved_at, created_at, updated_at, severity_badge, effort_badge, ai_prompt
 `
 
 type UpsertReviewThreadParams struct {
@@ -281,6 +363,9 @@ type UpsertReviewThreadParams struct {
 	Body           string      `json:"body"`
 	Url            string      `json:"url"`
 	AuthorLogin    string      `json:"author_login"`
+	SeverityBadge  string      `json:"severity_badge"`
+	EffortBadge    string      `json:"effort_badge"`
+	AiPrompt       string      `json:"ai_prompt"`
 	GhThreadNodeID pgtype.Text `json:"gh_thread_node_id"`
 	Line           pgtype.Int4 `json:"line"`
 	Side           pgtype.Text `json:"side"`
@@ -299,6 +384,9 @@ func (q *Queries) UpsertReviewThread(ctx context.Context, arg UpsertReviewThread
 		arg.Body,
 		arg.Url,
 		arg.AuthorLogin,
+		arg.SeverityBadge,
+		arg.EffortBadge,
+		arg.AiPrompt,
 		arg.GhThreadNodeID,
 		arg.Line,
 		arg.Side,
@@ -325,6 +413,9 @@ func (q *Queries) UpsertReviewThread(ctx context.Context, arg UpsertReviewThread
 		&i.ResolvedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SeverityBadge,
+		&i.EffortBadge,
+		&i.AiPrompt,
 	)
 	return i, err
 }

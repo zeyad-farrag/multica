@@ -49,6 +49,7 @@ import { ProjectPicker } from "../../projects/components/project-picker";
 import { CommentCard } from "./comment-card";
 import { CommentInput } from "./comment-input";
 import { AgentLiveCard, TaskRunHistory } from "./agent-live-card";
+import { CRFindingsStrip } from "./cr-findings-strip";
 import { useQuery } from "@tanstack/react-query";
 import { useAuthStore } from "@multica/core/auth";
 import { useCurrentWorkspace, useWorkspacePaths } from "@multica/core/paths";
@@ -1309,6 +1310,12 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
                   </PopoverContent>
                 </Popover>
               </div>
+            </div>
+
+            {/* CodeRabbit findings strip — only renders when there are CR
+                review threads on the issue's PR. Keyed by issue id. */}
+            <div className="mb-3">
+              <CRFindingsStrip key={`cr-${id}`} issueId={id} />
             </div>
 
             {/* Agent live output — sticky inside the Activity section so it

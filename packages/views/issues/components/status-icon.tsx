@@ -112,8 +112,16 @@ function TestingIcon() {
   return <ProgressCircle progress={0.7} />;
 }
 
+function CoderabbitIcon() {
+  return <ProgressCircle progress={0.78} />;
+}
+
+function ResolvingIcon() {
+  return <ProgressCircle progress={0.82} />;
+}
+
 function InReviewIcon() {
-  return <ProgressCircle progress={0.75} />;
+  return <ProgressCircle progress={0.88} />;
 }
 
 function StagedIcon() {
@@ -176,6 +184,8 @@ const STATUS_RENDERERS: Record<IssueStatus, () => React.ReactNode> = {
   code_review: CodeReviewIcon,
   fixing: FixingIcon,
   testing: TestingIcon,
+  coderabbit: CoderabbitIcon,
+  resolving: ResolvingIcon,
   in_review: InReviewIcon,
   staged: StagedIcon,
   done: DoneIcon,

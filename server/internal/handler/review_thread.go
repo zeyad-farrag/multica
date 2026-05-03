@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -32,7 +33,7 @@ import (
 )
 
 // reviewThreadDTO is the JSON shape we return for a single thread row. It
-// mirrors the local issue_review_thread columns the agent actually needs.
+// mirrors the local issue_review_thread columns the agent + UI need.
 type reviewThreadDTO struct {
 	ID              string  `json:"id"`
 	IssueID         string  `json:"issue_id"`
@@ -44,8 +45,11 @@ type reviewThreadDTO struct {
 	Line            *int32  `json:"line,omitempty"`
 	Side            string  `json:"side,omitempty"`
 	Severity        string  `json:"severity"`
+	SeverityBadge   string  `json:"severity_badge"`
+	EffortBadge     string  `json:"effort_badge"`
 	Title           string  `json:"title"`
 	Body            string  `json:"body"`
+	AIPrompt        string  `json:"ai_prompt"`
 	URL             string  `json:"url"`
 	AuthorLogin     string  `json:"author_login"`
 	State           string  `json:"state"`
@@ -57,20 +61,23 @@ type reviewThreadDTO struct {
 
 func reviewThreadToDTO(t db.IssueReviewThread) reviewThreadDTO {
 	d := reviewThreadDTO{
-		ID:           uuidToString(t.ID),
-		IssueID:      uuidToString(t.IssueID),
-		PrRepo:       t.PrRepo,
-		PrNumber:     t.PrNumber,
-		GhCommentID:  t.GhCommentID,
-		FilePath:     t.FilePath,
-		Severity:     t.Severity,
-		Title:        t.Title,
-		Body:         t.Body,
-		URL:          t.Url,
-		AuthorLogin:  t.AuthorLogin,
-		State:        t.State,
-		CreatedAt:    timestampToString(t.CreatedAt),
-		UpdatedAt:    timestampToString(t.UpdatedAt),
+		ID:            uuidToString(t.ID),
+		IssueID:       uuidToString(t.IssueID),
+		PrRepo:        t.PrRepo,
+		PrNumber:      t.PrNumber,
+		GhCommentID:   t.GhCommentID,
+		FilePath:      t.FilePath,
+		Severity:      t.Severity,
+		SeverityBadge: t.SeverityBadge,
+		EffortBadge:   t.EffortBadge,
+		Title:         t.Title,
+		Body:          t.Body,
+		AIPrompt:      t.AiPrompt,
+		URL:           t.Url,
+		AuthorLogin:   t.AuthorLogin,
+		State:         t.State,
+		CreatedAt:     timestampToString(t.CreatedAt),
+		UpdatedAt:     timestampToString(t.UpdatedAt),
 	}
 	if t.GhThreadNodeID.Valid {
 		d.GhThreadNodeID = t.GhThreadNodeID.String
@@ -224,6 +231,12 @@ func agentIDFromRequest(r *http.Request) pgtype.UUID {
 
 type replyRequest struct {
 	Content string `json:"content"`
+	// Optional: when set, the handler stamps `comment.posted_to_github_at`
+	// on the named fixer_reply row after the GitHub-side reply succeeds.
+	// Marcus's bmad-pr-resolve skill passes this so the UI can flip its
+	// "Pending" pill to "Posted" without polling. Server validates that
+	// the comment exists, has type='fixer_reply', and belongs to this issue.
+	FixerReplyCommentID string `json:"fixer_reply_comment_id,omitempty"`
 }
 
 // ReplyToReviewThread handles POST /api/issues/{id}/review-threads/{threadID}/reply.
@@ -274,17 +287,88 @@ func (h *Handler) ReplyToReviewThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	// Optional: stamp posted_to_github_at on the matching fixer_reply row.
+	// Best-effort: a failed mark doesn't unwind the GitHub-side success;
+	// the next call to /reply for the same thread is idempotent (the
+	// MarkFixerReplyPosted query uses COALESCE so a second stamp is a
+	// no-op). The UI will heal the pill on the next list refresh.
+	postedAt := h.maybeMarkFixerReplyPosted(ctx, issue.ID, body.FixerReplyCommentID, thread.ID)
+
+	resp := map[string]any{
 		"thread_id":   uuidToString(thread.ID),
 		"comment_id":  res.CommentID,
 		"comment_url": res.CommentURL,
-	})
+	}
+	if postedAt != "" {
+		resp["fixer_reply_posted_at"] = postedAt
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// maybeMarkFixerReplyPosted stamps comment.posted_to_github_at on the named
+// fixer_reply row when the caller passed `fixer_reply_comment_id` in the
+// reply request body. Returns the timestamp as RFC3339 or "" on any failure
+// (logged; never propagated as an error). Validates that the row exists,
+// has type='fixer_reply', and that its parent's review_thread_id matches
+// the thread we just replied on — defense against a caller passing a
+// fixer_reply id that doesn't belong to this thread.
+func (h *Handler) maybeMarkFixerReplyPosted(ctx context.Context, issueID pgtype.UUID, fixerReplyID string, threadID pgtype.UUID) string {
+	if fixerReplyID == "" {
+		return ""
+	}
+	cid := parseUUID(fixerReplyID)
+	if !cid.Valid {
+		slog.Warn("fixer_reply mark: invalid uuid", "id", fixerReplyID)
+		return ""
+	}
+	c, err := h.Queries.GetComment(ctx, cid)
+	if err != nil {
+		slog.Warn("fixer_reply mark: lookup failed", "id", fixerReplyID, "error", err)
+		return ""
+	}
+	if uuidToString(c.IssueID) != uuidToString(issueID) {
+		slog.Warn("fixer_reply mark: cross-issue", "comment_issue", uuidToString(c.IssueID), "request_issue", uuidToString(issueID))
+		return ""
+	}
+	if c.Type != "fixer_reply" {
+		slog.Warn("fixer_reply mark: wrong type", "type", c.Type, "id", fixerReplyID)
+		return ""
+	}
+	// Walk up to the parent and confirm its review_thread_id matches.
+	if !c.ParentID.Valid {
+		slog.Warn("fixer_reply mark: no parent", "id", fixerReplyID)
+		return ""
+	}
+	parent, err := h.Queries.GetComment(ctx, c.ParentID)
+	if err != nil {
+		slog.Warn("fixer_reply mark: parent lookup failed", "id", fixerReplyID, "error", err)
+		return ""
+	}
+	if !parent.ReviewThreadID.Valid || uuidToString(parent.ReviewThreadID) != uuidToString(threadID) {
+		slog.Warn("fixer_reply mark: parent's review_thread_id does not match",
+			"parent_thread", uuidToString(parent.ReviewThreadID),
+			"reply_thread", uuidToString(threadID))
+		return ""
+	}
+	updated, err := h.Queries.MarkFixerReplyPosted(ctx, cid)
+	if err != nil {
+		slog.Warn("fixer_reply mark: stamp failed", "id", fixerReplyID, "error", err)
+		return ""
+	}
+	if !updated.PostedToGithubAt.Valid {
+		return ""
+	}
+	return timestampToString(updated.PostedToGithubAt)
 }
 
 type resolveRequest struct {
 	// Optional: when set, the handler posts a reply first and then resolves.
 	// Lets the dev agent do "explain + resolve" in a single round-trip.
 	Reply string `json:"reply,omitempty"`
+	// Optional: when set alongside `reply`, the handler stamps
+	// `comment.posted_to_github_at` on the named fixer_reply row after the
+	// GitHub reply succeeds. Same semantics as replyRequest.FixerReplyCommentID.
+	FixerReplyCommentID string `json:"fixer_reply_comment_id,omitempty"`
 }
 
 // ResolveReviewThread handles POST /api/issues/{id}/review-threads/{threadID}/resolve.
@@ -340,6 +424,9 @@ func (h *Handler) ResolveReviewThread(w http.ResponseWriter, r *http.Request) {
 		}
 		resp["comment_id"] = replyRes.CommentID
 		resp["comment_url"] = replyRes.CommentURL
+		if postedAt := h.maybeMarkFixerReplyPosted(ctx, issue.ID, body.FixerReplyCommentID, thread.ID); postedAt != "" {
+			resp["fixer_reply_posted_at"] = postedAt
+		}
 	}
 
 	resolveRes, err := h.ReviewActions.ResolveReviewThread(ctx, binding, thread, agentIDFromRequest(r))

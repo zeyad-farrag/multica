@@ -177,16 +177,18 @@ type ChatSession struct {
 }
 
 type Comment struct {
-	ID          pgtype.UUID        `json:"id"`
-	IssueID     pgtype.UUID        `json:"issue_id"`
-	AuthorType  string             `json:"author_type"`
-	AuthorID    pgtype.UUID        `json:"author_id"`
-	Content     string             `json:"content"`
-	Type        string             `json:"type"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
-	ParentID    pgtype.UUID        `json:"parent_id"`
-	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	ID               pgtype.UUID        `json:"id"`
+	IssueID          pgtype.UUID        `json:"issue_id"`
+	AuthorType       string             `json:"author_type"`
+	AuthorID         pgtype.UUID        `json:"author_id"`
+	Content          string             `json:"content"`
+	Type             string             `json:"type"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	ParentID         pgtype.UUID        `json:"parent_id"`
+	WorkspaceID      pgtype.UUID        `json:"workspace_id"`
+	ReviewThreadID   pgtype.UUID        `json:"review_thread_id"`
+	PostedToGithubAt pgtype.Timestamptz `json:"posted_to_github_at"`
 }
 
 type CommentReaction struct {
@@ -346,6 +348,9 @@ type IssueReviewThread struct {
 	ResolvedAt      pgtype.Timestamptz `json:"resolved_at"`
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+	SeverityBadge   string             `json:"severity_badge"`
+	EffortBadge     string             `json:"effort_badge"`
+	AiPrompt        string             `json:"ai_prompt"`
 }
 
 type IssueSubscriber struct {

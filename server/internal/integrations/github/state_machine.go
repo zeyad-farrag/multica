@@ -9,35 +9,72 @@ import "strings"
 // Decision. The webhook handler is responsible for I/O (loading the issue,
 // querying review state from GitHub) and for applying the Decision.
 //
-// Status vocabulary (after migration 1002): backlog, todo, in_progress,
-// in_review, done, blocked, cancelled, planning, ready_for_dev, code_review,
-// fixing, testing, staged.
+// Status vocabulary (after migration 1010): backlog, todo, in_progress,
+// done, blocked, cancelled, planning, ready_for_dev, code_review, fixing,
+// testing, coderabbit, resolving, in_review, staged.
 //
-// Status transition table (BMAD spec):
+// CR-resolution flow (Phase 1, post-2026-05-03 redesign):
+//
+//   testing      → coderabbit   (Marcus dispatched: publish PR; CR reviews)
+//   coderabbit   → resolving    (CR submitted review with unresolved threads)
+//   coderabbit   → staged       (CR APPROVED on first pass; skips in_review)
+//   resolving    → in_review    (Rosa's <!-- resolution-note -->)         [sidecar; Phase 2]
+//   in_review    → coderabbit   (Marcus's <!-- pr-republished -->)        [sidecar; Phase 2]
+//   coderabbit   → staged       (CR APPROVED — sole path to staged)
+//
+// Until Phase 2 ships, the sidecar still routes resolving → code_review →
+// testing → in_review (Quinn + Murat) and Marcus completes a cycle in
+// in_review WITHOUT a state-machine-driven exit — issues will park there
+// after Marcus finishes his /resolve loop. Manual completion or a bespoke
+// sidecar marker is required to drain the in_review backlog mid-rollout.
+//
+// Status transition table (this file owns only the GitHub-driven edges):
 //
 //   Event                                              From            To
 //   ---------------------------------------------------------------- ------------
-//   pull_request.opened                                pre-in_review   in_review
-//   pull_request.synchronize                           in_review       fixing
-//   review.submitted state=changes_requested (CR bot)  in_review       fixing
-//   review.submitted (any other CR signal) +
-//     no open CHANGES_REQUESTED + no unresolved
-//     CR threads                                       in_review       staged
-//   review_thread (any) + same predicate above         in_review       staged
-//   pull_request.closed merged=true                    any             done
+//   pull_request.opened                                pre-in_review   coderabbit
+//   review.submitted state=changes_requested (CR bot)  coderabbit      resolving
+//   review.submitted (CR bot) + LocalUnresolvedCount>0 coderabbit      resolving
+//   review.submitted (CR bot) + LocalUnresolvedCount>0 in_review       resolving
+//   review.submitted state=approved (CR bot) + clean   coderabbit      staged
+//   review.submitted state=approved (CR bot) + clean   in_review       staged
+//   review.submitted state=commented + clean           coderabbit      noop  (race guard)
+//   review.submitted state=commented + clean           in_review       noop  (race guard)
+//   review_thread + LocalUnresolvedCount>0             coderabbit      resolving (race fallback)
+//   review_thread (any)                                in_review       noop  (sidecar-driven)
+//   review_thread + predicate clear                    coderabbit      noop  (req: APPROVED only)
+//   review_comment.created (CR bot) + count>0          coderabbit      resolving (via Decide(ReviewThread))
+//   pull_request.closed merged=true                    coderabbit      staged → done (chained)
+//   pull_request.closed merged=true                    in_review       staged → done (chained)
+//   pull_request.closed merged=true                    staged          done
 //   pull_request.closed merged=false                   any             blocked
-//   pull_request.reopened                              blocked|done    in_review
+//   pull_request.reopened                              blocked|done    coderabbit
+//   pull_request.synchronize                           any             noop (sidecar drives bounce-backs)
+//
+// Two invariants the table enforces:
+//
+//   1. APPROVED-only-→-staged: only an explicit CR APPROVED review event
+//      can autonomously promote an issue to staged. Thread-resolved events
+//      draining the local count to zero are NOT a "CR approved" signal —
+//      they are Marcus's own /resolve calls in the in_review loop, and
+//      reacting to them would (a) bounce in_review back to resolving on
+//      every resolve and (b) violate the "ONLY APPROVED → staged" rule.
+//
+//   2. Race guard for COMMENTED reviews: GitHub delivers
+//      `pull_request_review` ahead of the inline
+//      `pull_request_review_comment` events. handleReview's bulk-mirror
+//      pulls the review's comments via REST before Decide is called, so
+//      LocalUnresolvedThreadCount reflects the full set on the original
+//      review event. The per-comment re-eval in handleReviewComment is the
+//      fallback when bulk-fetch fails. If both fail, the cr-settle sweeper
+//      rescues stuck `coderabbit` issues after MULTICA_CR_SETTLE_SECS.
 //
 // Anything not listed above is a no-op (Decision.Action == ActionNoop).
 //
-// Agent-pusher carve-outs (Bug 1, 2026-04-27):
-//
-//   1. Synchronize events whose sender.login is in AgentPusherLogins are
-//      ignored — they reflect the dev agent's own follow-up commit on the
-//      branch they just opened the PR from, not a fixing iteration.
-//   2. Synchronize events arriving within SynchronizeCooldown of the
-//      pull_request.opened event for the same PR are also ignored — GitHub
-//      sometimes fires opened+synchronize back-to-back from one push.
+// Synchronize is intentionally noop in the new flow. The CR-resolution loop
+// is driven by review events and sidecar markers, not by raw push events.
+// SynchronizeCooldown + IsAgentPusher are kept for documentation and future
+// re-use but no longer participate in any transition.
 
 // Action is what the webhook handler should do as a result of an event.
 type Action int
@@ -59,8 +96,12 @@ const (
 // Status values referenced by the state machine.
 const (
 	StatusInProgress = "in_progress"
-	StatusInReview   = "in_review"
+	StatusCodeReview = "code_review"
 	StatusFixing     = "fixing"
+	StatusTesting    = "testing"
+	StatusCoderabbit = "coderabbit"
+	StatusResolving  = "resolving"
+	StatusInReview   = "in_review"
 	StatusStaged     = "staged"
 	StatusBlocked    = "blocked"
 	StatusDone       = "done"
@@ -203,10 +244,11 @@ func Decide(in Input) Decision {
 func decidePR(in Input) Decision {
 	switch in.PRAction {
 	case PRActionOpened:
-		// Always link, even if the issue is already past in_review — the
-		// link metadata is useful regardless. But keep the status if it's
-		// already at or past in_review, to avoid demoting a staged issue.
-		if isAtOrPast(in.IssueStatus, StatusInReview) {
+		// First push from Marcus opens the PR; the issue moves to the
+		// `coderabbit` column where CR reviews. Link metadata is recorded
+		// regardless. If the issue is already at or past coderabbit (e.g.
+		// re-delivery of an opened event), preserve the existing status.
+		if isAtOrPast(in.IssueStatus, StatusCoderabbit) {
 			return Decision{
 				Action:       ActionLinkPR,
 				NewStatus:    in.IssueStatus, // preserve
@@ -215,33 +257,16 @@ func decidePR(in Input) Decision {
 		}
 		return Decision{
 			Action:       ActionLinkPR,
-			NewStatus:    StatusInReview,
+			NewStatus:    StatusCoderabbit,
 			ActivityKind: "pr_opened",
 		}
 
 	case PRActionSynchronize:
-		// Agent pushed a new commit while on in_review. Per the BMAD spec
-		// this means a fixing iteration is in flight — move to `fixing`.
-		// CodeRabbit will re-review automatically; on a clean pass the
-		// review handler flips back through in_review -> staged.
-		//
-		// Bug 1 carve-outs: ignore the synchronize when (a) the sender is
-		// a BMAD agent pushing on its own branch, or (b) the synchronize
-		// landed within SynchronizeCooldown of the pull_request.opened
-		// event for the same PR (GitHub double-fires from a single push).
-		if in.IssueStatus == StatusInReview {
-			if IsAgentPusher(in.SenderLogin) {
-				return Decision{Action: ActionNoop}
-			}
-			if in.SecondsSinceOpened > 0 && in.SecondsSinceOpened < SynchronizeCooldown {
-				return Decision{Action: ActionNoop}
-			}
-			return Decision{
-				Action:       ActionSetStatus,
-				NewStatus:    StatusFixing,
-				ActivityKind: "pr_updated",
-			}
-		}
+		// Synchronize is intentionally noop. Bounce-backs through the CR
+		// loop are driven by CR review events (handled in decideReview)
+		// and sidecar markers, not by raw push events. Marcus pushes are
+		// suppressed by the agent-pusher carve-out historically; in the
+		// new model we just don't react to pushes at all.
 		return Decision{Action: ActionNoop}
 
 	case PRActionClosed:
@@ -249,38 +274,26 @@ func decidePR(in Input) Decision {
 			if in.IssueStatus == StatusDone {
 				return Decision{Action: ActionNoop}
 			}
-			// Bug D fix (2026-04-28): preserve the staged audit step.
-			//
-			// User-expected flow:
-			//   CR signals "ready to merge" → staged (handled in
-			//   decideReview when ReviewByCR=true) → human merges PR →
-			//   done.
-			//
-			// Two real-world scenarios where this used to skip staged:
-			//   1. CR is NOT installed on the repo (e.g. zeyad-farrag/
-			//      TimeTrack). The decideReview path that flips
-			//      in_review → staged never fires. Human merges directly
-			//      from in_review. We must still pass through staged so
-			//      the audit trail and any staged-only automation
-			//      (deploys, notifications) get a chance to run.
-			//   2. CR is installed but the merge happens before the
-			//      staged predicate fires (race or bypass).
-			//
-			// Implementation: if the merge arrives while the issue is
-			// still at `in_review`, transition first to `staged` and
-			// emit a distinct activity kind. The webhook handler will
-			// re-receive (or in some cases is responsible for emitting
-			// a follow-up) — and a future PR-closed event with current
-			// status `staged` flips to `done`. In the simple no-CR case,
-			// the staged → done flip happens via the same merge event
-			// being re-evaluated by an idempotent staged-to-done helper
-			// that the handler runs after applying any in_review →
-			// staged decision (see webhook_handler.go ApplyDecision).
+			// Preserve the staged audit step. User-expected flow:
+			//   CR signals "ready to merge" → staged → human merges → done.
+			// If a merge arrives while the issue is still at coderabbit
+			// or in_review (e.g. CR not installed on the repo, or merge
+			// races the predicate), transition first to staged with a
+			// distinct activity kind; the chained applyDecision logic in
+			// the webhook handler runs the staged → done flip in the same
+			// turn (see webhook_handler.go).
 			if in.IssueStatus == StatusStaged {
 				return Decision{
 					Action:       ActionSetStatus,
 					NewStatus:    StatusDone,
 					ActivityKind: "pr_merged",
+				}
+			}
+			if in.IssueStatus == StatusCoderabbit {
+				return Decision{
+					Action:       ActionSetStatus,
+					NewStatus:    StatusStaged,
+					ActivityKind: "pr_merged_from_coderabbit",
 				}
 			}
 			if in.IssueStatus == StatusInReview {
@@ -306,10 +319,13 @@ func decidePR(in Input) Decision {
 		}
 
 	case PRActionReopened:
+		// Re-opening a closed/done PR re-enters the CR cycle from the
+		// top — i.e. coderabbit, where Marcus's republish + CR's review
+		// will drive the next state.
 		if in.IssueStatus == StatusBlocked || in.IssueStatus == StatusDone {
 			return Decision{
 				Action:       ActionSetStatus,
-				NewStatus:    StatusInReview,
+				NewStatus:    StatusCoderabbit,
 				ActivityKind: "pr_reopened",
 			}
 		}
@@ -323,88 +339,109 @@ func decideReview(in Input) Decision {
 		return Decision{Action: ActionNoop}
 	}
 
+	// CHANGES_REQUESTED: CR formally blocked the PR. Bounce to `resolving`
+	// (the new CR-loop column) so Rosa addresses the feedback per-thread.
+	// Idempotent: already-resolving stays put.
 	if in.ReviewState == ReviewChangesRequested {
-		// CodeRabbit formally requested changes — bounce to `fixing` so
-		// Amelia addresses the feedback. The PR-loop counter (sidecar)
-		// handles the cap-2 escalation to `blocked` after repeated cycles.
-		if in.IssueStatus == StatusFixing {
+		if in.IssueStatus == StatusResolving {
 			return Decision{Action: ActionNoop}
 		}
-		return Decision{
-			Action:       ActionSetStatus,
-			NewStatus:    StatusFixing,
-			ActivityKind: "review_changes_requested",
+		// Only flip from columns where CR is the actor (coderabbit and
+		// in_review). Other columns (in_progress, fixing, code_review,
+		// testing) are owned by other agents in the inner loops; the
+		// sidecar handles those bounces.
+		if in.IssueStatus == StatusCoderabbit || in.IssueStatus == StatusInReview {
+			return Decision{
+				Action:       ActionSetStatus,
+				NewStatus:    StatusResolving,
+				ActivityKind: "review_changes_requested",
+			}
 		}
+		return Decision{Action: ActionNoop}
 	}
 
-	// Non-CHANGES review (approved / commented).
+	// COMMENTED review with at least one unresolved inline thread =
+	// soft-changes-requested. Same target as CHANGES_REQUESTED: resolving.
+	// Applies on coderabbit (first review pass) and on in_review (CR
+	// re-reviewed Marcus's resolving-cycle re-push and found new issues).
+	if in.LocalUnresolvedThreadCount > 0 {
+		if in.IssueStatus == StatusCoderabbit || in.IssueStatus == StatusInReview {
+			return Decision{
+				Action:       ActionSetStatus,
+				NewStatus:    StatusResolving,
+				ActivityKind: "review_comments_unresolved",
+			}
+		}
+		return Decision{Action: ActionNoop}
+	}
+
+	// Predicate clear + APPROVED: flip to staged.
+	//   - From coderabbit: first-pass clean, skip in_review entirely.
+	//   - From in_review: Marcus has finished posting replies + resolving threads.
 	//
-	// New behaviour (step 2): if CR left a COMMENTED review with at least one
-	// unresolved inline thread, treat it as soft-changes-requested and bounce
-	// to `fixing`. CR's COMMENTED state is its way of leaving nits/issues
-	// without formally blocking the PR — but the BMAD pipeline contract
-	// requires the dev agent to walk every comment, so we treat it the same
-	// as CHANGES_REQUESTED for orchestration purposes.
-	if in.IssueStatus == StatusInReview && in.LocalUnresolvedThreadCount > 0 {
-		return Decision{
-			Action:       ActionSetStatus,
-			NewStatus:    StatusFixing,
-			ActivityKind: "review_comments_unresolved",
-		}
-	}
-
-	// Otherwise re-evaluate the staged predicate: only flip if we're
-	// currently in_review and CR has nothing outstanding.
-	if in.IssueStatus == StatusInReview &&
-		in.NoOpenCRChangesRequest &&
-		in.NoUnresolvedCRThreads {
-		return Decision{
-			Action:       ActionSetStatus,
-			NewStatus:    StatusStaged,
-			ActivityKind: "review_passed",
+	// APPROVED is required (not COMMENTED) because GitHub delivers
+	// `pull_request_review` before the per-finding `pull_request_review_comment`
+	// webhooks: on a COMMENTED review with N inline findings the local mirror
+	// is still empty here and we would falsely promote. Once the inline rows
+	// land, the thread-event path or the per-comment re-evaluation in
+	// handleReviewComment drives `→ resolving`.
+	if in.ReviewState == ReviewApproved && in.NoOpenCRChangesRequest && in.NoUnresolvedCRThreads {
+		if in.IssueStatus == StatusCoderabbit || in.IssueStatus == StatusInReview {
+			return Decision{
+				Action:       ActionSetStatus,
+				NewStatus:    StatusStaged,
+				ActivityKind: "review_passed",
+			}
 		}
 	}
 	return Decision{Action: ActionNoop}
 }
 
 func decideReviewThread(in Input) Decision {
-	// Thread-level events (resolved / unresolved) trigger two possible
-	// transitions:
+	// Inline findings present on `coderabbit`: drive `→ resolving` without
+	// waiting for a wrapping `pull_request_review` event. Reachable from
+	// handleReviewComment's per-comment re-evaluation, which closes the
+	// COMMENTED-review race that decideReview's APPROVED gate leaves to
+	// the inline path.
 	//
-	//   in_review + all resolved + no open CHANGES → staged
-	//   fixing  + all resolved + no open CHANGES → in_review
-	//
-	// The second transition is what closes the dev-agent fixing loop: once
-	// Amelia has resolved every CR thread on GitHub, the issue lifts back
-	// to in_review and is ready for CR's next review pass (which will then
-	// flip it to staged via the review path).
-	if in.NoOpenCRChangesRequest && in.NoUnresolvedCRThreads {
-		switch in.IssueStatus {
-		case StatusInReview:
-			return Decision{
-				Action:       ActionSetStatus,
-				NewStatus:    StatusStaged,
-				ActivityKind: "review_passed",
-			}
-		case StatusFixing:
-			return Decision{
-				Action:       ActionSetStatus,
-				NewStatus:    StatusInReview,
-				ActivityKind: "review_threads_resolved",
-			}
+	// Intentionally NOT firing from `in_review`: thread events on in_review
+	// are Marcus's own /resolve calls in his bmad-pr-resolve cycle. Reacting
+	// to them here would bounce the issue back to resolving on every resolve
+	// during his loop. The CR-loop exit from in_review is sidecar-driven
+	// (Marcus emits a marker; sidecar flips in_review → coderabbit). New CR
+	// findings posted while the issue is in_review reach the state machine
+	// via decideReview when CR submits its wrapping review event.
+	if in.LocalUnresolvedThreadCount > 0 && in.IssueStatus == StatusCoderabbit {
+		return Decision{
+			Action:       ActionSetStatus,
+			NewStatus:    StatusResolving,
+			ActivityKind: "review_comments_unresolved",
 		}
 	}
+
+	// Predicate-clear → staged is intentionally absent: only an explicit
+	// APPROVED review from CR can autonomously promote an issue (handled in
+	// decideReview). Threads draining to zero is a "Marcus done" signal, not
+	// a "CR approved" signal — the sidecar handles the in_review exit.
 	return Decision{Action: ActionNoop}
 }
 
 // isAtOrPast returns true when current is at or past target in the
-// PR-driven status progression: in_review → staged → done. Anything else
-// (todo/in_progress/blocked) counts as "before".
+// PR-driven status progression: coderabbit → resolving → in_review →
+// staged → done. Anything else (todo/in_progress/code_review/fixing/
+// testing/blocked) counts as "before" — those columns are inner-loop
+// work that doesn't touch the CR cycle's monotone ordering.
+//
+// This is used by PRActionOpened to avoid demoting a PR that's already
+// progressed past the initial coderabbit column (e.g. on webhook
+// redelivery after the issue has already moved through resolving).
 func isAtOrPast(current, target string) bool {
 	rank := map[string]int{
-		StatusInReview: 1,
-		StatusStaged:   2,
-		StatusDone:     3,
+		StatusCoderabbit: 1,
+		StatusResolving:  2,
+		StatusInReview:   3,
+		StatusStaged:     4,
+		StatusDone:       5,
 	}
 	c, cok := rank[current]
 	t, tok := rank[target]
