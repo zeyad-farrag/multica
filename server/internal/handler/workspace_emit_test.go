@@ -56,17 +56,18 @@ func TestWorkspaceEmit(t *testing.T) {
 			t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, recorder.Code, recorder.Body.String())
 		}
 
+		t.Cleanup(func() {
+			var userID string
+			if err := testPool.QueryRow(context.Background(), `SELECT id FROM "user" WHERE email = $1`, email).Scan(&userID); err == nil {
+				_, _ = testPool.Exec(context.Background(), `DELETE FROM member WHERE user_id = $1`, userID)
+				_, _ = testPool.Exec(context.Background(), `DELETE FROM "user" WHERE id = $1`, userID)
+			}
+		})
+
 		var created MemberWithUserResponse
 		if err := json.NewDecoder(recorder.Body).Decode(&created); err != nil {
 			t.Fatalf("decode create member response: %v", err)
 		}
-
-		t.Cleanup(func() {
-			_, _ = testPool.Exec(context.Background(), `DELETE FROM "user" WHERE id = $1`, created.UserID)
-		})
-		t.Cleanup(func() {
-			_, _ = testPool.Exec(context.Background(), `DELETE FROM member WHERE id = $1`, created.ID)
-		})
 
 		mu.Lock()
 		defer mu.Unlock()
