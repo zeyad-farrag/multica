@@ -9,9 +9,18 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
+
+func withEventTestURLParams(req *http.Request, pairs ...string) *http.Request {
+	rctx := chi.NewRouteContext()
+	for i := 0; i+1 < len(pairs); i += 2 {
+		rctx.URLParams.Add(pairs[i], pairs[i+1])
+	}
+	return req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+}
 
 func TestWorkspaceEmit(t *testing.T) {
 	t.Run("MemberAdded", func(t *testing.T) {
@@ -112,7 +121,7 @@ func TestWorkspaceEmit(t *testing.T) {
 		req := newRequest(http.MethodPatch, "/api/workspaces/"+testWorkspaceID+"/members/"+memberID, map[string]any{
 			"role": "admin",
 		})
-		req = withURLParams(req, "id", testWorkspaceID, "memberId", memberID)
+		req = withEventTestURLParams(req, "id", testWorkspaceID, "memberId", memberID)
 
 		recorder := httptest.NewRecorder()
 		testHandler.UpdateMember(recorder, req)
@@ -175,7 +184,7 @@ func TestWorkspaceEmit(t *testing.T) {
 		memberID, userID := createEventTestMember(t, "member-removed", "member")
 
 		req := newRequest(http.MethodDelete, "/api/workspaces/"+testWorkspaceID+"/members/"+memberID, nil)
-		req = withURLParams(req, "id", testWorkspaceID, "memberId", memberID)
+		req = withEventTestURLParams(req, "id", testWorkspaceID, "memberId", memberID)
 
 		recorder := httptest.NewRecorder()
 		testHandler.DeleteMember(recorder, req)

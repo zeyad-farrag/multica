@@ -26,6 +26,7 @@ func createEventTestIssue(t *testing.T) string {
 	}
 
 	t.Cleanup(func() {
+		_, _ = testPool.Exec(context.Background(), `DELETE FROM comment WHERE issue_id = $1`, issueID)
 		_, _ = testPool.Exec(context.Background(), `DELETE FROM issue WHERE id = $1`, issueID)
 	})
 

@@ -11,36 +11,7 @@ import pg from "pg";
 // back to localhost. dotenv sets unset-vs-empty both as "" — treating them
 // the same matches user intent.
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || `http://localhost:${process.env.PORT || "8080"}`;
-const DEV_VERIFICATION_CODE = process.env.MULTICA_E2E_VERIFICATION_CODE || "888888";
 const DATABASE_URL = process.env.DATABASE_URL ?? "postgres://multica:multica@localhost:5432/multica?sslmode=disable";
-
-function loginEmailCandidates(email: string): string[] {
-  const normalized = email.trim().toLowerCase();
-  const [localPart, domainPart] = normalized.split("@");
-
-  if (!localPart || !domainPart) {
-    return [normalized];
-  }
-
-  const suffix = `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
-  return [normalized, `${localPart}+e2e-${suffix}@${domainPart}`];
-}
-
-async function readVerificationCode(email: string): Promise<string | null> {
-  const client = new pg.Client(DATABASE_URL);
-  try {
-    await client.connect();
-    const result = await client.query(
-      "SELECT code FROM verification_code WHERE email = $1 AND used = FALSE AND expires_at > now() ORDER BY created_at DESC LIMIT 1",
-      [email],
-    );
-    return result.rows[0]?.code ?? null;
-  } catch {
-    return null;
-  } finally {
-    await client.end().catch(() => undefined);
-  }
-}
 
 interface TestWorkspace {
   id: string;
@@ -55,69 +26,59 @@ export class TestApiClient {
   private createdIssueIds: string[] = [];
 
   async login(email: string, name: string) {
-    let loginEmail = email.trim().toLowerCase();
-    let sendCodeError: Error | null = null;
+    const client = new pg.Client(DATABASE_URL);
+    await client.connect();
+    try {
+      // Keep each E2E login isolated so previous test runs do not trip the
+      // per-email send-code rate limit.
+      await client.query("DELETE FROM verification_code WHERE email = $1", [email]);
 
-    for (const candidate of loginEmailCandidates(email)) {
+      // Step 1: Send verification code
       const sendRes = await fetch(`${API_BASE}/auth/send-code`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: candidate }),
+        body: JSON.stringify({ email }),
       });
-
-      if (sendRes.ok) {
-        loginEmail = candidate;
-        sendCodeError = null;
-        break;
+      if (!sendRes.ok) {
+        throw new Error(`send-code failed: ${sendRes.status}`);
       }
 
-      if (sendRes.status === 429) {
-        sendCodeError = new Error(`send-code rate limited for ${candidate}`);
-        continue;
+      // Step 2: Read code from database
+      const result = await client.query(
+        "SELECT code FROM verification_code WHERE email = $1 AND used = FALSE AND expires_at > now() ORDER BY created_at DESC LIMIT 1",
+        [email],
+      );
+      if (result.rows.length === 0) {
+        throw new Error(`No verification code found for ${email}`);
       }
 
-      const body = await sendRes.text();
-      throw new Error(`send-code failed: ${sendRes.status} ${body}`);
-    }
+      // Step 3: Verify code to get JWT
+      const verifyRes = await fetch(`${API_BASE}/auth/verify-code`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, code: result.rows[0].code }),
+      });
+      if (!verifyRes.ok) {
+        throw new Error(`verify-code failed: ${verifyRes.status}`);
+      }
+      const data = await verifyRes.json();
 
-    if (sendCodeError) {
-      throw sendCodeError;
-    }
+      this.token = data.token;
 
-    // Prefer the documented non-production 888888 master code, but keep the
-    // database read fallback for local servers that run with APP_ENV=production.
-    let verifyRes = await fetch(`${API_BASE}/auth/verify-code`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: loginEmail, code: DEV_VERIFICATION_CODE }),
-    });
-    if (!verifyRes.ok) {
-      const fallbackCode = await readVerificationCode(loginEmail);
-      if (fallbackCode) {
-        verifyRes = await fetch(`${API_BASE}/auth/verify-code`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email: loginEmail, code: fallbackCode }),
+      // Update user name if needed
+      if (name && data.user?.name !== name) {
+        await this.authedFetch("/api/me", {
+          method: "PATCH",
+          body: JSON.stringify({ name }),
         });
       }
-    }
-    if (!verifyRes.ok) {
-      const body = await verifyRes.text();
-      throw new Error(`verify-code failed: ${verifyRes.status} ${body}`);
-    }
-    const data = await verifyRes.json();
 
-    this.token = data.token;
+      await client.query("DELETE FROM verification_code WHERE email = $1", [email]);
 
-    // Update user name if needed
-    if (name && data.user?.name !== name) {
-      await this.authedFetch("/api/me", {
-        method: "PATCH",
-        body: JSON.stringify({ name }),
-      });
+      return data;
+    } finally {
+      await client.end();
     }
-
-    return data;
   }
 
   async getWorkspaces(): Promise<TestWorkspace[]> {
