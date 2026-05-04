@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -59,7 +60,12 @@ func TestWorkspaceEmit(t *testing.T) {
 		t.Cleanup(func() {
 			var userID string
 			if err := testPool.QueryRow(context.Background(), `SELECT id FROM "user" WHERE email = $1`, email).Scan(&userID); err == nil {
-				_, _ = testPool.Exec(context.Background(), `DELETE FROM member WHERE user_id = $1`, userID)
+				_, _ = testPool.Exec(
+					context.Background(),
+					`DELETE FROM member WHERE user_id = $1 AND workspace_id = $2`,
+					userID,
+					testWorkspaceID,
+				)
 				_, _ = testPool.Exec(context.Background(), `DELETE FROM "user" WHERE id = $1`, userID)
 			}
 		})
@@ -142,6 +148,9 @@ func TestWorkspaceEmit(t *testing.T) {
 		if len(captured) != 1 {
 			t.Fatalf("expected 1 member updated event, got %d", len(captured))
 		}
+		if captured[0].WorkspaceID != testWorkspaceID {
+			t.Fatalf("expected workspace %q, got %q", testWorkspaceID, captured[0].WorkspaceID)
+		}
 
 		payload, ok := captured[0].Payload.(map[string]any)
 		if !ok {
@@ -200,6 +209,9 @@ func TestWorkspaceEmit(t *testing.T) {
 		if len(captured) != 1 {
 			t.Fatalf("expected 1 member removed event, got %d", len(captured))
 		}
+		if captured[0].WorkspaceID != testWorkspaceID {
+			t.Fatalf("expected workspace %q, got %q", testWorkspaceID, captured[0].WorkspaceID)
+		}
 
 		payload, ok := captured[0].Payload.(map[string]any)
 		if !ok {
@@ -251,21 +263,17 @@ func TestWorkspaceEmit(t *testing.T) {
 		})
 
 		var originalName string
-		var originalDescription string
-		if err := testPool.QueryRow(context.Background(), `
-			SELECT name, description
-			FROM workspace
-			WHERE id = $1
-		`, testWorkspaceID).Scan(&originalName, &originalDescription); err != nil {
+		var originalDescription sql.NullString
+		if err := testPool.QueryRow(context.Background(), `SELECT name, description FROM workspace WHERE id = $1`, testWorkspaceID).Scan(&originalName, &originalDescription); err != nil {
 			t.Fatalf("load original workspace: %v", err)
 		}
 
 		t.Cleanup(func() {
-			_, _ = testPool.Exec(context.Background(), `
-				UPDATE workspace
-				SET name = $2, description = $3
-				WHERE id = $1
-			`, testWorkspaceID, originalName, originalDescription)
+			var description any
+			if originalDescription.Valid {
+				description = originalDescription.String
+			}
+			_, _ = testPool.Exec(context.Background(), `UPDATE workspace SET name = $2, description = $3 WHERE id = $1`, testWorkspaceID, originalName, description)
 		})
 
 		updatedName := "Handler Tests Updated"
