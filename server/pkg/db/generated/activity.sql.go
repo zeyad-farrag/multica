@@ -138,3 +138,56 @@ func (q *Queries) ListActivities(ctx context.Context, arg ListActivitiesParams) 
 	}
 	return items, nil
 }
+
+const systemListActivityByWorkspace = `-- name: SystemListActivityByWorkspace :many
+SELECT id, workspace_id, issue_id, actor_type, actor_id, action, details, created_at FROM activity_log
+WHERE workspace_id = $1
+  AND ($2::timestamptz IS NULL OR created_at > $2::timestamptz)
+  AND ($3::text IS NULL OR action = $3::text)
+  AND ($4::uuid IS NULL OR actor_id = $4::uuid)
+ORDER BY created_at ASC, id ASC
+LIMIT $5
+`
+
+type SystemListActivityByWorkspaceParams struct {
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	Since       pgtype.Timestamptz `json:"since"`
+	Action      pgtype.Text        `json:"action"`
+	ActorID     pgtype.UUID        `json:"actor_id"`
+	LimitCount  int32              `json:"limit_count"`
+}
+
+func (q *Queries) SystemListActivityByWorkspace(ctx context.Context, arg SystemListActivityByWorkspaceParams) ([]ActivityLog, error) {
+	rows, err := q.db.Query(ctx, systemListActivityByWorkspace,
+		arg.WorkspaceID,
+		arg.Since,
+		arg.Action,
+		arg.ActorID,
+		arg.LimitCount,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ActivityLog{}
+	for rows.Next() {
+		var i ActivityLog
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.IssueID,
+			&i.ActorType,
+			&i.ActorID,
+			&i.Action,
+			&i.Details,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

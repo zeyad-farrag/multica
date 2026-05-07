@@ -17,8 +17,8 @@ import (
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/events"
-	ghintegration "github.com/multica-ai/multica/server/internal/integrations/github"
 	"github.com/multica-ai/multica/server/internal/handler"
+	ghintegration "github.com/multica-ai/multica/server/internal/integrations/github"
 	"github.com/multica-ai/multica/server/internal/middleware"
 	"github.com/multica-ai/multica/server/internal/realtime"
 	"github.com/multica-ai/multica/server/internal/service"
@@ -109,7 +109,7 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analytics
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   origins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Workspace-ID", "X-Workspace-Slug", "X-Request-ID", "X-Agent-ID", "X-Task-ID", "X-CSRF-Token", "X-Client-Platform", "X-Client-Version", "X-Client-OS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Workspace-ID", "X-Workspace-Slug", "X-Request-ID", "X-Agent-ID", "X-Task-ID", "X-CSRF-Token", "X-Client-Platform", "X-Client-Version", "X-Client-OS", "X-Team-App-Secret"},
 		AllowCredentials: true,
 		MaxAge:           300,
 	}))
@@ -160,6 +160,20 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analytics
 
 	// Public API
 	r.Get("/api/config", h.GetConfig)
+
+	if teamAppSecret := strings.TrimSpace(os.Getenv("TEAM_APP_SHARED_SECRET")); teamAppSecret != "" {
+		r.Route("/api/system", func(r chi.Router) {
+			r.Use(middleware.SharedSecretAuth(teamAppSecret))
+			r.Post("/inbox", h.SystemCreateInboxItem)
+			r.Route("/workspaces/{workspaceID}", func(r chi.Router) {
+				r.Get("/", h.SystemGetWorkspace)
+				r.Get("/issues", h.SystemListIssuesByWorkspace)
+				r.Get("/comments", h.SystemListCommentsByWorkspace)
+				r.Get("/activity", h.SystemListActivityByWorkspace)
+				r.Get("/members", h.SystemListMembersByWorkspace)
+			})
+		})
+	}
 
 	// GitHub webhook (HMAC-authenticated, no user session required).
 	// Skips registration silently if GITHUB_APP_* env vars are unset — useful
@@ -525,4 +539,3 @@ func splitAndTrim(s string) []string {
 	}
 	return res
 }
-

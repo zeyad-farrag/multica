@@ -22,6 +22,22 @@ WHERE id = $1;
 SELECT * FROM issue
 WHERE id = $1 AND workspace_id = $2;
 
+-- name: SystemListIssuesByWorkspace :many
+SELECT id, workspace_id, title, description, status, priority,
+       assignee_type, assignee_id, creator_type, creator_id,
+       parent_issue_id, acceptance_criteria, context_refs, position, due_date,
+       created_at, updated_at, number, project_id, origin_type, origin_id,
+       first_executed_at, pr_url, pr_number, pr_repo, estimate_minutes, phase_state
+FROM issue
+WHERE workspace_id = @workspace_id
+  AND (sqlc.narg('updated_since')::timestamptz IS NULL OR updated_at > sqlc.narg('updated_since')::timestamptz)
+  AND (
+    sqlc.narg('cursor_updated_at')::timestamptz IS NULL
+    OR (updated_at, id) > (sqlc.narg('cursor_updated_at')::timestamptz, sqlc.narg('cursor_id')::uuid)
+  )
+ORDER BY updated_at ASC, id ASC
+LIMIT @limit_count;
+
 -- name: CreateIssue :one
 INSERT INTO issue (
     workspace_id, title, description, status, priority,

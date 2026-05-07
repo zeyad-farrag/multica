@@ -466,6 +466,65 @@ func (q *Queries) MarkFixerReplyPosted(ctx context.Context, id pgtype.UUID) (Com
 	return i, err
 }
 
+const systemListCommentsByWorkspace = `-- name: SystemListCommentsByWorkspace :many
+SELECT c.id, c.issue_id, c.author_type, c.author_id, c.content, c.type, c.created_at, c.updated_at, c.parent_id, c.workspace_id, c.review_thread_id, c.posted_to_github_at
+FROM comment c
+JOIN issue i ON i.id = c.issue_id AND i.workspace_id = c.workspace_id
+WHERE c.workspace_id = $1
+  AND ($2::uuid IS NULL OR c.author_id = $2::uuid)
+  AND ($3::text IS NULL OR c.type = $3::text)
+  AND ($4::date IS NULL OR c.created_at::date = $4::date)
+ORDER BY c.created_at ASC, c.id ASC
+LIMIT $5
+`
+
+type SystemListCommentsByWorkspaceParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	AuthorID    pgtype.UUID `json:"author_id"`
+	CommentType pgtype.Text `json:"comment_type"`
+	CommentDate pgtype.Date `json:"comment_date"`
+	LimitCount  int32       `json:"limit_count"`
+}
+
+func (q *Queries) SystemListCommentsByWorkspace(ctx context.Context, arg SystemListCommentsByWorkspaceParams) ([]Comment, error) {
+	rows, err := q.db.Query(ctx, systemListCommentsByWorkspace,
+		arg.WorkspaceID,
+		arg.AuthorID,
+		arg.CommentType,
+		arg.CommentDate,
+		arg.LimitCount,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Comment{}
+	for rows.Next() {
+		var i Comment
+		if err := rows.Scan(
+			&i.ID,
+			&i.IssueID,
+			&i.AuthorType,
+			&i.AuthorID,
+			&i.Content,
+			&i.Type,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ParentID,
+			&i.WorkspaceID,
+			&i.ReviewThreadID,
+			&i.PostedToGithubAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const updateComment = `-- name: UpdateComment :one
 UPDATE comment SET
     content = $2,
