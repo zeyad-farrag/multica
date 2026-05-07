@@ -32,6 +32,17 @@ WHERE id = $1;
 SELECT * FROM comment
 WHERE id = $1 AND workspace_id = $2;
 
+-- name: SystemListCommentsByWorkspace :many
+SELECT c.*
+FROM comment c
+JOIN issue i ON i.id = c.issue_id AND i.workspace_id = c.workspace_id
+WHERE c.workspace_id = @workspace_id
+  AND (sqlc.narg('author_id')::uuid IS NULL OR c.author_id = sqlc.narg('author_id')::uuid)
+  AND (sqlc.narg('comment_type')::text IS NULL OR c.type = sqlc.narg('comment_type')::text)
+  AND (sqlc.narg('comment_date')::date IS NULL OR c.created_at::date = sqlc.narg('comment_date')::date)
+ORDER BY c.created_at ASC, c.id ASC
+LIMIT @limit_count;
+
 -- name: CreateComment :one
 INSERT INTO comment (issue_id, workspace_id, author_type, author_id, content, type, parent_id)
 VALUES ($1, $2, $3, $4, $5, $6, sqlc.narg(parent_id))

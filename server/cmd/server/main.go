@@ -111,6 +111,21 @@ func envDuration(name string, def time.Duration) time.Duration {
 func main() {
 	logger.Init()
 
+	teamAppURLSet := strings.TrimSpace(os.Getenv("TEAM_APP_URL")) != ""
+	teamAppSecretSet := strings.TrimSpace(os.Getenv("TEAM_APP_SHARED_SECRET")) != ""
+	if teamAppURLSet != teamAppSecretSet {
+		urlState := "unset"
+		if teamAppURLSet {
+			urlState = "set"
+		}
+		secretState := "unset"
+		if teamAppSecretSet {
+			secretState = "set"
+		}
+		slog.Error("team-app integration partially configured: TEAM_APP_URL=" + urlState + ", TEAM_APP_SHARED_SECRET=" + secretState)
+		os.Exit(1)
+	}
+
 	// Warn about missing configuration
 	if os.Getenv("JWT_SECRET") == "" {
 		slog.Warn("JWT_SECRET is not set — using insecure default. Set JWT_SECRET for production use.")

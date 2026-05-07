@@ -969,6 +969,85 @@ func (q *Queries) SetIssuePR(ctx context.Context, arg SetIssuePRParams) (Issue, 
 	return i, err
 }
 
+const systemListIssuesByWorkspace = `-- name: SystemListIssuesByWorkspace :many
+SELECT id, workspace_id, title, description, status, priority,
+       assignee_type, assignee_id, creator_type, creator_id,
+       parent_issue_id, acceptance_criteria, context_refs, position, due_date,
+       created_at, updated_at, number, project_id, origin_type, origin_id,
+       first_executed_at, pr_url, pr_number, pr_repo, estimate_minutes, phase_state
+FROM issue
+WHERE workspace_id = $1
+  AND ($2::timestamptz IS NULL OR updated_at > $2::timestamptz)
+  AND (
+    $3::timestamptz IS NULL
+    OR (updated_at, id) > ($3::timestamptz, $4::uuid)
+  )
+ORDER BY updated_at ASC, id ASC
+LIMIT $5
+`
+
+type SystemListIssuesByWorkspaceParams struct {
+	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
+	UpdatedSince    pgtype.Timestamptz `json:"updated_since"`
+	CursorUpdatedAt pgtype.Timestamptz `json:"cursor_updated_at"`
+	CursorID        pgtype.UUID        `json:"cursor_id"`
+	LimitCount      int32              `json:"limit_count"`
+}
+
+func (q *Queries) SystemListIssuesByWorkspace(ctx context.Context, arg SystemListIssuesByWorkspaceParams) ([]Issue, error) {
+	rows, err := q.db.Query(ctx, systemListIssuesByWorkspace,
+		arg.WorkspaceID,
+		arg.UpdatedSince,
+		arg.CursorUpdatedAt,
+		arg.CursorID,
+		arg.LimitCount,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Issue{}
+	for rows.Next() {
+		var i Issue
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.Title,
+			&i.Description,
+			&i.Status,
+			&i.Priority,
+			&i.AssigneeType,
+			&i.AssigneeID,
+			&i.CreatorType,
+			&i.CreatorID,
+			&i.ParentIssueID,
+			&i.AcceptanceCriteria,
+			&i.ContextRefs,
+			&i.Position,
+			&i.DueDate,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Number,
+			&i.ProjectID,
+			&i.OriginType,
+			&i.OriginID,
+			&i.FirstExecutedAt,
+			&i.PrUrl,
+			&i.PrNumber,
+			&i.PrRepo,
+			&i.EstimateMinutes,
+			&i.PhaseState,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const updateIssue = `-- name: UpdateIssue :one
 UPDATE issue SET
     title = COALESCE($2, title),

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"os"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
@@ -18,6 +19,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/events"
 	githubintegration "github.com/multica-ai/multica/server/internal/integrations/github"
 	"github.com/multica-ai/multica/server/internal/middleware"
+	teamgate "github.com/multica-ai/multica/server/internal/multica"
 	"github.com/multica-ai/multica/server/internal/realtime"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/storage"
@@ -65,12 +67,13 @@ type Handler struct {
 	Storage               storage.Storage
 	CFSigner              *auth.CloudFrontSigner
 	Analytics             analytics.Client
+	GateClient            *teamgate.GateClient
 	// ReviewActions wraps GitHub GraphQL mutations the dev agent uses while
 	// walking CR review threads in the fixing loop. nil when the GITHUB_APP_*
 	// env vars are not configured — the corresponding routes are then not
 	// registered (see router.go).
 	ReviewActions *githubintegration.ReviewActions
-	cfg                   Config
+	cfg           Config
 }
 
 func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *events.Bus, emailService *service.EmailService, store storage.Storage, cfSigner *auth.CloudFrontSigner, analyticsClient analytics.Client, cfg Config) *Handler {
@@ -100,6 +103,7 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 		Storage:               store,
 		CFSigner:              cfSigner,
 		Analytics:             analyticsClient,
+		GateClient:            teamgate.NewGateClient(os.Getenv("TEAM_APP_URL"), os.Getenv("TEAM_APP_SHARED_SECRET")),
 		cfg:                   cfg,
 	}
 }
@@ -123,6 +127,13 @@ func strToText(s string) pgtype.Text                { return util.StrToText(s) }
 func timestampToString(t pgtype.Timestamptz) string { return util.TimestampToString(t) }
 func timestampToPtr(t pgtype.Timestamptz) *string   { return util.TimestampToPtr(t) }
 func uuidToPtr(u pgtype.UUID) *string               { return util.UUIDToPtr(u) }
+
+func nullableUUID(s *string) pgtype.UUID {
+	if s == nil {
+		return pgtype.UUID{}
+	}
+	return parseUUID(*s)
+}
 
 // publish sends a domain event through the event bus.
 func (h *Handler) publish(eventType, workspaceID, actorType, actorID string, payload any) {

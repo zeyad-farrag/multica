@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/logger"
+	teamgate "github.com/multica-ai/multica/server/internal/multica"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
@@ -214,6 +215,97 @@ func int32ToInt4(v *int32) pgtype.Int4 {
 
 func int32Ptr(v int32) *int32 {
 	return &v
+}
+
+func intPtrFromInt32Ptr(v *int32) *int {
+	if v == nil {
+		return nil
+	}
+	out := int(*v)
+	return &out
+}
+
+func stringPtrFromText(v pgtype.Text) *string {
+	if !v.Valid {
+		return nil
+	}
+	return &v.String
+}
+
+func uuidStringPtr(v pgtype.UUID) *string {
+	if !v.Valid {
+		return nil
+	}
+	s := uuidToString(v)
+	return &s
+}
+
+func timePtrFromTimestamp(v pgtype.Timestamptz) *time.Time {
+	if !v.Valid {
+		return nil
+	}
+	return &v.Time
+}
+
+func gatePatchFromUpdate(rawFields map[string]json.RawMessage, req UpdateIssueRequest, params db.UpdateIssueParams) teamgate.GatePatch {
+	patch := teamgate.GatePatch{}
+	if _, touchedType := rawFields["assignee_type"]; touchedType {
+		patch.Assignee = &teamgate.GateAssignee{
+			Type: stringPtrFromText(params.AssigneeType),
+			ID:   uuidStringPtr(params.AssigneeID),
+		}
+	} else if _, touchedID := rawFields["assignee_id"]; touchedID {
+		patch.Assignee = &teamgate.GateAssignee{
+			Type: stringPtrFromText(params.AssigneeType),
+			ID:   uuidStringPtr(params.AssigneeID),
+		}
+	}
+	if _, ok := rawFields["estimate_minutes"]; ok {
+		patch.EstimateMinutes = intPtrFromInt32Ptr(req.EstimateMinutes)
+	}
+	if _, ok := rawFields["due_date"]; ok {
+		patch.DueDate = timePtrFromTimestamp(params.DueDate)
+	}
+	if req.Status != nil {
+		patch.Status = req.Status
+	}
+	return patch
+}
+
+func writeGateDeny(w http.ResponseWriter, body []byte, batchIndex, batchSize *int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	if batchIndex == nil || batchSize == nil {
+		if len(body) == 0 {
+			_, _ = w.Write([]byte(`{"error":"issue update denied by Team App"}`))
+			return
+		}
+		_, _ = w.Write(body)
+		return
+	}
+	var payload map[string]any
+	if len(body) == 0 || json.Unmarshal(body, &payload) != nil {
+		payload = map[string]any{"error": "issue update denied by Team App"}
+	}
+	payload["batch_index"] = *batchIndex
+	payload["batch_size"] = *batchSize
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func gateBypassedActivityParams(workspaceID, issueID pgtype.UUID, actorType, actorID string, result teamgate.GateResult) db.CreateActivityParams {
+	details, _ := json.Marshal(map[string]any{
+		"reason":      "team_app_gate_fail_open",
+		"status_code": result.StatusCode,
+		"error":       fmt.Sprint(result.Err),
+	})
+	return db.CreateActivityParams{
+		WorkspaceID: workspaceID,
+		IssueID:     issueID,
+		ActorType:   pgtype.Text{String: actorType, Valid: actorType != ""},
+		ActorID:     parseUUID(actorID),
+		Action:      "gate_bypassed",
+		Details:     details,
+	}
 }
 
 func issueToResponse(i db.Issue, issuePrefix string) IssueResponse {
@@ -1343,10 +1435,46 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	issue, err := h.Queries.UpdateIssue(r.Context(), params)
+	actorType, actorID := h.resolveActor(r, userID, workspaceID)
+	gatePatch := gatePatchFromUpdate(rawFields, req, params)
+	gateResult := teamgate.GateResult{Outcome: teamgate.GateOutcomeAllow}
+	if h.GateClient != nil && h.GateClient.Enabled() && gatePatch.IsTimeRelevant() {
+		gateResult = h.GateClient.CallGate(r.Context(), teamgate.GateRequestBody{
+			WorkspaceID: workspaceID,
+			IssueID:     id,
+			ActorUserID: userID,
+			Force:       false,
+			Patch:       gatePatch,
+		})
+		if gateResult.Outcome == teamgate.GateOutcomeDeny {
+			writeGateDeny(w, gateResult.Body, nil, nil)
+			return
+		}
+	}
+
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update issue")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	qtx := h.Queries.WithTx(tx)
+
+	issue, err := qtx.UpdateIssue(r.Context(), params)
 	if err != nil {
 		slog.Warn("update issue failed", append(logger.RequestAttrs(r), "error", err, "issue_id", id, "workspace_id", workspaceID)...)
 		writeError(w, http.StatusInternalServerError, "failed to update issue: "+err.Error())
+		return
+	}
+	if gateResult.Outcome == teamgate.GateOutcomeFailOpen {
+		slog.Warn("team-app gate bypassed for issue update", append(logger.RequestAttrs(r), "issue_id", id, "workspace_id", workspaceID, "status_code", gateResult.StatusCode, "error", gateResult.Err)...)
+		if _, err := qtx.CreateActivity(r.Context(), gateBypassedActivityParams(issue.WorkspaceID, issue.ID, actorType, actorID, gateResult)); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to update issue")
+			return
+		}
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update issue")
 		return
 	}
 
@@ -1363,9 +1491,6 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	prevDueDate := timestampToPtr(prevIssue.DueDate)
 	dueDateChanged := prevDueDate != resp.DueDate && (prevDueDate == nil) != (resp.DueDate == nil) ||
 		(prevDueDate != nil && resp.DueDate != nil && *prevDueDate != *resp.DueDate)
-
-	// Determine actor identity: agent (via X-Agent-ID header) or member.
-	actorType, actorID := h.resolveActor(r, userID, workspaceID)
 
 	h.publish(protocol.EventIssueUpdated, workspaceID, actorType, actorID, map[string]any{
 		"issue":               resp,
@@ -1586,8 +1711,16 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 	}
 
 	workspaceID := h.resolveWorkspaceID(r)
-	updated := 0
-	for _, issueID := range req.IssueIDs {
+	actorType, actorID := h.resolveActor(r, userID, workspaceID)
+	type batchIssuePlan struct {
+		RequestIndex int
+		IssueID      string
+		PrevIssue    db.Issue
+		Params       db.UpdateIssueParams
+		GateResult   teamgate.GateResult
+	}
+	plans := make([]batchIssuePlan, 0, len(req.IssueIDs))
+	for idx, issueID := range req.IssueIDs {
 		prevIssue, err := h.Queries.GetIssueInWorkspace(r.Context(), db.GetIssueInWorkspaceParams{
 			ID:          parseUUID(issueID),
 			WorkspaceID: parseUUID(workspaceID),
@@ -1717,23 +1850,86 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		issue, err := h.Queries.UpdateIssue(r.Context(), params)
-		if err != nil {
-			slog.Warn("batch update issue failed", "issue_id", issueID, "error", err)
+		plans = append(plans, batchIssuePlan{
+			RequestIndex: idx,
+			IssueID:      issueID,
+			PrevIssue:    prevIssue,
+			Params:       params,
+			GateResult:   teamgate.GateResult{Outcome: teamgate.GateOutcomeAllow},
+		})
+	}
+
+	batchSize := len(req.IssueIDs)
+	for i := range plans {
+		gatePatch := gatePatchFromUpdate(rawUpdates, req.Updates, plans[i].Params)
+		if h.GateClient == nil || !h.GateClient.Enabled() || !gatePatch.IsTimeRelevant() {
 			continue
+		}
+		result := h.GateClient.CallGate(r.Context(), teamgate.GateRequestBody{
+			WorkspaceID: workspaceID,
+			IssueID:     plans[i].IssueID,
+			ActorUserID: userID,
+			Force:       false,
+			Patch:       gatePatch,
+		})
+		plans[i].GateResult = result
+		if result.Outcome == teamgate.GateOutcomeDeny {
+			batchIndex := plans[i].RequestIndex
+			writeGateDeny(w, result.Body, &batchIndex, &batchSize)
+			return
+		}
+	}
+
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update issues")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	qtx := h.Queries.WithTx(tx)
+
+	type batchUpdatedIssue struct {
+		Plan  batchIssuePlan
+		Issue db.Issue
+		Resp  IssueResponse
+	}
+	updatedIssues := make([]batchUpdatedIssue, 0, len(plans))
+	for _, plan := range plans {
+		issue, err := qtx.UpdateIssue(r.Context(), plan.Params)
+		if err != nil {
+			slog.Warn("batch update issue failed", "issue_id", plan.IssueID, "error", err)
+			continue
+		}
+		if plan.GateResult.Outcome == teamgate.GateOutcomeFailOpen {
+			slog.Warn("team-app gate bypassed for batch issue update", "issue_id", plan.IssueID, "workspace_id", workspaceID, "status_code", plan.GateResult.StatusCode, "error", plan.GateResult.Err)
+			if _, err := qtx.CreateActivity(r.Context(), gateBypassedActivityParams(issue.WorkspaceID, issue.ID, actorType, actorID, plan.GateResult)); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to update issues")
+				return
+			}
 		}
 
 		prefix := h.getIssuePrefix(r.Context(), issue.WorkspaceID)
 		resp := issueToResponse(issue, prefix)
-		actorType, actorID := h.resolveActor(r, userID, workspaceID)
+		updatedIssues = append(updatedIssues, batchUpdatedIssue{Plan: plan, Issue: issue, Resp: resp})
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update issues")
+		return
+	}
 
-		assigneeChanged := (req.Updates.AssigneeType != nil || req.Updates.AssigneeID != nil) &&
+	updated := 0
+	for _, item := range updatedIssues {
+		prevIssue := item.Plan.PrevIssue
+		issue := item.Issue
+		_, batchTouchedType := rawUpdates["assignee_type"]
+		_, batchTouchedID := rawUpdates["assignee_id"]
+		assigneeChanged := (batchTouchedType || batchTouchedID) &&
 			(prevIssue.AssigneeType.String != issue.AssigneeType.String || uuidToString(prevIssue.AssigneeID) != uuidToString(issue.AssigneeID))
 		statusChanged := req.Updates.Status != nil && prevIssue.Status != issue.Status
 		priorityChanged := req.Updates.Priority != nil && prevIssue.Priority != issue.Priority
 
 		h.publish(protocol.EventIssueUpdated, workspaceID, actorType, actorID, map[string]any{
-			"issue":            resp,
+			"issue":            item.Resp,
 			"assignee_changed": assigneeChanged,
 			"status_changed":   statusChanged,
 			"priority_changed": priorityChanged,
