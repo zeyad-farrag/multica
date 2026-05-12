@@ -109,7 +109,7 @@ export function PRAutomationTab() {
             <p className="text-xs text-muted-foreground">
               Bind GitHub repositories to this workspace so pull-request events
               (open, review, merge) automatically move the linked Multica
-              issue between <span className="font-medium">Backlog → In Review → Staged → Done</span>.
+              issue between <span className="font-medium">Coderabbit → Resolving → Staged → Done</span>.
               Issues are matched by identifier (e.g. <code>MUL-50</code>) found
               in the PR branch, body, or title.
             </p>

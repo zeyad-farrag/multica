@@ -1,12 +1,11 @@
 package github
 
-// Review-thread mutation actions used by the dev agent's fixing loop.
+// Review-thread mutation actions used by the dev agent's resolving loop.
 //
-// In step 1 we mirrored CR review threads into our local issue_review_thread
-// table. In step 2 the state machine drives in_review → fixing whenever a CR
-// review lands with at least one unresolved local thread. Step 3 (this file)
-// gives the dev agent a way to actually walk those threads in the fixing
-// loop and resolve them on GitHub:
+// CR review threads are mirrored into our local issue_review_thread table.
+// When a CR review lands with at least one unresolved local thread, the
+// state machine drives coderabbit → resolving. This file gives the dev
+// agent a way to actually walk those threads and resolve them on GitHub:
 //
 //   1. ReplyToReviewThread — appends a reply comment under an existing
 //      review thread via the GraphQL `addPullRequestReviewThreadReply`
@@ -38,7 +37,7 @@ import (
 )
 
 // ReviewActions is a small service that wraps the GraphQL mutations the
-// dev agent needs while walking review threads in the fixing loop.
+// dev agent needs while walking review threads in the resolving loop.
 //
 // Construct one per-process via NewReviewActionsFromEnv (re-uses the same
 // GitHub App auth as WebhookHandler) and reuse it across requests.
@@ -156,7 +155,7 @@ type ResolveResult struct {
 //
 // agentID, when non-zero, is stamped onto resolved_by_agent so audit
 // logs can attribute the resolution. Pass the dev agent's UUID
-// (Amelia's) when the call originates from the fixing loop.
+// (Amelia's) when the call originates from the resolving loop.
 func (a *ReviewActions) ResolveReviewThread(ctx context.Context, binding db.WorkspaceRepoBinding, thread db.IssueReviewThread, agentID pgtype.UUID) (*ResolveResult, error) {
 	if !thread.GhThreadNodeID.Valid || thread.GhThreadNodeID.String == "" {
 		return nil, errors.New("thread has no gh_thread_node_id; cannot resolve via GraphQL")
