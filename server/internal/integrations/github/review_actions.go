@@ -37,7 +37,7 @@ import (
 )
 
 // ReviewActions is a small service that wraps the GraphQL mutations the
-// dev agent needs while walking review threads in the fixing loop.
+// dev agent needs while walking review threads in the resolving loop.
 //
 // Construct one per-process via NewReviewActionsFromEnv (re-uses the same
 // GitHub App auth as WebhookHandler) and reuse it across requests.
