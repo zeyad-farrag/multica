@@ -49,10 +49,17 @@ func TestMain(m *testing.M) {
 
 	pool, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
+		if shouldRunWithoutIntegrationDB() {
+			os.Exit(m.Run())
+		}
 		fmt.Printf("Skipping integration tests: could not connect to database: %v\n", err)
 		os.Exit(0)
 	}
 	if err := pool.Ping(ctx); err != nil {
+		if shouldRunWithoutIntegrationDB() {
+			pool.Close()
+			os.Exit(m.Run())
+		}
 		fmt.Printf("Skipping integration tests: database not reachable: %v\n", err)
 		pool.Close()
 		os.Exit(0)
@@ -94,6 +101,29 @@ func TestMain(m *testing.M) {
 	testServer.Close()
 	pool.Close()
 	os.Exit(code)
+}
+
+func shouldRunWithoutIntegrationDB() bool {
+	// TestMain normally skips the whole cmd/server package when Postgres is
+	// unavailable. Keep this whitelist to pure unit tests that explicitly run
+	// with -run and do not depend on the integration fixture.
+	for i, arg := range os.Args {
+		var pattern string
+		switch {
+		case arg == "-test.run" && i+1 < len(os.Args):
+			pattern = os.Args[i+1]
+		case strings.HasPrefix(arg, "-test.run="):
+			pattern = strings.TrimPrefix(arg, "-test.run=")
+		}
+		if pattern == "" {
+			continue
+		}
+		if strings.Contains(pattern, "TestCRFlow_v2_CommentedClean") ||
+			strings.Contains(pattern, "TestCRPostCommentSettleSweeper") {
+			return true
+		}
+	}
+	return false
 }
 
 func setupIntegrationTestFixture(ctx context.Context, pool *pgxpool.Pool) (string, string, error) {

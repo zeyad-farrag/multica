@@ -179,7 +179,7 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analytics
 	// Skips registration silently if GITHUB_APP_* env vars are unset — useful
 	// for local dev / fresh installs.
 	if os.Getenv("GITHUB_APP_ID") != "" && os.Getenv("GITHUB_APP_PRIVATE_KEY_PATH") != "" && os.Getenv("GITHUB_APP_WEBHOOK_SECRET") != "" {
-		if gh, err := ghintegration.NewWebhookHandlerFromEnv(queries, bus); err != nil {
+		if gh, err := ghintegration.NewWebhookHandlerFromEnv(queries, pool, bus); err != nil {
 			// Fail open: log but don't crash the server. The webhook just
 			// won't be available until the operator fixes the config.
 			slog.Warn("github webhook handler init failed", "error", err)
@@ -336,13 +336,21 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analytics
 					r.Delete("/links/{linkId}", h.DeleteIssueLink)
 					r.Get("/links", h.ListIssueLinks)
 					r.Get("/blockers", h.ListIssueBlockers)
+					r.Get("/cr-attempts", h.ListCRAttempts)
+					r.Get("/cr-attempts/{attemptID}/signals", h.ListCRSignals)
 
 					// CR review threads (mutation routes mounted only when GitHub
 					// App auth is configured — see h.ReviewActions init above).
 					r.Get("/review-threads", h.ListReviewThreads)
+					r.Post("/review-threads/next", h.ClaimNextResolverThread)
+					r.Get("/review-threads/next-unposted", h.GetNextUnpostedThread)
+					r.Post("/review-threads/{threadID}/process", h.ProcessReviewThread)
+					r.Post("/review-threads/{threadID}/release-claim", h.ReleaseThreadClaim)
+					r.Post("/review-threads/{threadID}/mark-replied", h.MarkThreadReplyPosted)
 					if h.ReviewActions != nil {
 						r.Post("/review-threads/{threadID}/reply", h.ReplyToReviewThread)
 						r.Post("/review-threads/{threadID}/resolve", h.ResolveReviewThread)
+						r.Post("/cr-review/dismiss-prior-changes-requested", h.DismissPriorCRChangesRequested)
 					}
 				})
 			})

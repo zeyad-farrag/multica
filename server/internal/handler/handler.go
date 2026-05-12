@@ -24,6 +24,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/storage"
 	"github.com/multica-ai/multica/server/internal/util"
+	dbtx "github.com/multica-ai/multica/server/pkg/db"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -33,10 +34,6 @@ func randomID() string {
 	b := make([]byte, 16)
 	rand.Read(b)
 	return hex.EncodeToString(b)
-}
-
-type txStarter interface {
-	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
 type dbExecutor interface {
@@ -54,7 +51,7 @@ type Config struct {
 type Handler struct {
 	Queries               *db.Queries
 	DB                    dbExecutor
-	TxStarter             txStarter
+	TxStarter             dbtx.TxStarter
 	Hub                   *realtime.Hub
 	Bus                   *events.Bus
 	TaskService           *service.TaskService
@@ -76,7 +73,7 @@ type Handler struct {
 	cfg           Config
 }
 
-func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *events.Bus, emailService *service.EmailService, store storage.Storage, cfSigner *auth.CloudFrontSigner, analyticsClient analytics.Client, cfg Config) *Handler {
+func New(queries *db.Queries, txStarter dbtx.TxStarter, hub *realtime.Hub, bus *events.Bus, emailService *service.EmailService, store storage.Storage, cfSigner *auth.CloudFrontSigner, analyticsClient analytics.Client, cfg Config) *Handler {
 	var executor dbExecutor
 	if candidate, ok := txStarter.(dbExecutor); ok {
 		executor = candidate

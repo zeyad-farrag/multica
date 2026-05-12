@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -55,6 +56,10 @@ type reviewThreadDTO struct {
 	State           string  `json:"state"`
 	ResolvedByAgent *string `json:"resolved_by_agent,omitempty"`
 	ResolvedAt      *string `json:"resolved_at,omitempty"`
+	ProcessedAt     *string `json:"processed_by_resolver_at,omitempty"`
+	ProcessedBy     *string `json:"processed_by_agent,omitempty"`
+	ClaimedBy       *string `json:"claimed_by_agent,omitempty"`
+	ClaimExpiresAt  *string `json:"claim_expires_at,omitempty"`
 	CreatedAt       string  `json:"created_at"`
 	UpdatedAt       string  `json:"updated_at"`
 }
@@ -97,14 +102,64 @@ func reviewThreadToDTO(t db.IssueReviewThread) reviewThreadDTO {
 		s := timestampToString(t.ResolvedAt)
 		d.ResolvedAt = &s
 	}
+	if t.ProcessedByResolverAt.Valid {
+		s := timestampToString(t.ProcessedByResolverAt)
+		d.ProcessedAt = &s
+	}
+	if t.ProcessedByAgent.Valid {
+		s := uuidToString(t.ProcessedByAgent)
+		d.ProcessedBy = &s
+	}
+	if t.ClaimedByAgent.Valid {
+		s := uuidToString(t.ClaimedByAgent)
+		d.ClaimedBy = &s
+	}
+	if t.ClaimExpiresAt.Valid {
+		s := timestampToString(t.ClaimExpiresAt)
+		d.ClaimExpiresAt = &s
+	}
 	return d
+}
+
+func claimedThreadToDTO(t db.ClaimNextUnprocessedThreadRow) reviewThreadDTO {
+	thread := db.IssueReviewThread{
+		ID:                    t.ID,
+		WorkspaceID:           t.WorkspaceID,
+		IssueID:               t.IssueID,
+		PrRepo:                t.PrRepo,
+		PrNumber:              t.PrNumber,
+		GhCommentID:           t.GhCommentID,
+		GhThreadNodeID:        t.GhThreadNodeID,
+		FilePath:              t.FilePath,
+		Line:                  t.Line,
+		Side:                  t.Side,
+		Severity:              t.Severity,
+		Title:                 t.Title,
+		Body:                  t.Body,
+		Url:                   t.Url,
+		AuthorLogin:           t.AuthorLogin,
+		State:                 t.State,
+		ResolvedByAgent:       t.ResolvedByAgent,
+		ResolvedAt:            t.ResolvedAt,
+		CreatedAt:             t.CreatedAt,
+		UpdatedAt:             t.UpdatedAt,
+		SeverityBadge:         t.SeverityBadge,
+		EffortBadge:           t.EffortBadge,
+		AiPrompt:              t.AiPrompt,
+		ProcessedByResolverAt: t.ProcessedByResolverAt,
+		ProcessedByAgent:      t.ProcessedByAgent,
+		ClaimedByAgent:        t.ClaimedByAgent,
+		ClaimExpiresAt:        t.ClaimExpiresAt,
+	}
+	return reviewThreadToDTO(thread)
 }
 
 // ListReviewThreads handles GET /api/issues/{id}/review-threads.
 //
 // Query params:
-//   state=unresolved   Only return rows where state='unresolved'.
-//                      Default (omitted) returns all threads on the issue.
+//
+//	state=unresolved   Only return rows where state='unresolved'.
+//	                   Default (omitted) returns all threads on the issue.
 //
 // The id path param accepts either a UUID or an identifier ("TIM-11").
 func (h *Handler) ListReviewThreads(w http.ResponseWriter, r *http.Request) {
@@ -184,18 +239,19 @@ func (h *Handler) loadThreadForIssue(w http.ResponseWriter, r *http.Request, iss
 		writeError(w, http.StatusBadRequest, "invalid thread id")
 		return db.IssueReviewThread{}, false
 	}
-	threads, err := h.Queries.ListReviewThreadsByIssue(r.Context(), issueID)
+	thread, err := h.Queries.GetReviewThreadInIssue(r.Context(), db.GetReviewThreadInIssueParams{
+		ID:      tid,
+		IssueID: issueID,
+	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load review threads")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "review thread not found on this issue")
+			return db.IssueReviewThread{}, false
+		}
+		writeError(w, http.StatusInternalServerError, "failed to load review thread")
 		return db.IssueReviewThread{}, false
 	}
-	for _, t := range threads {
-		if uuidToString(t.ID) == threadID {
-			return t, true
-		}
-	}
-	writeError(w, http.StatusNotFound, "review thread not found on this issue")
-	return db.IssueReviewThread{}, false
+	return thread, true
 }
 
 // resolveBindingForIssue looks up the workspace_repo_binding for the issue's
@@ -227,6 +283,282 @@ func agentIDFromRequest(r *http.Request) pgtype.UUID {
 		return pgtype.UUID{}
 	}
 	return parseUUID(id)
+}
+
+func (h *Handler) resolveAgentActor(w http.ResponseWriter, r *http.Request, userID string, workspaceID pgtype.UUID) (pgtype.UUID, bool) {
+	actorType, actorIDStr := h.resolveActor(r, userID, uuidToString(workspaceID))
+	if actorType != "agent" {
+		writeError(w, http.StatusUnauthorized, "agent identity required (set X-Agent-ID)")
+		return pgtype.UUID{}, false
+	}
+	actorAgentID := parseUUID(actorIDStr)
+	if !actorAgentID.Valid {
+		writeError(w, http.StatusBadRequest, "invalid agent id")
+		return pgtype.UUID{}, false
+	}
+	return actorAgentID, true
+}
+
+type claimRequest struct {
+	ClaimTTLSecs int `json:"claim_ttl_secs,omitempty"`
+}
+
+func (h *Handler) ClaimNextResolverThread(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	issue, ok := h.loadIssueForUser(w, r, chi.URLParam(r, "id"))
+	if !ok {
+		return
+	}
+	actorAgentID, ok := h.resolveAgentActor(w, r, userID, issue.WorkspaceID)
+	if !ok {
+		return
+	}
+	var req claimRequest
+	if r.Body != nil && r.Body != http.NoBody {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+	}
+	ttl := req.ClaimTTLSecs
+	if ttl <= 0 || ttl > 3600 {
+		ttl = 900
+	}
+	row, err := h.Queries.ClaimNextUnprocessedThread(r.Context(), db.ClaimNextUnprocessedThreadParams{
+		IssueID:        issue.ID,
+		ClaimedByAgent: actorAgentID,
+		ClaimTtlSecs:   int32(ttl),
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to claim review thread")
+		return
+	}
+	writeJSON(w, http.StatusOK, claimedThreadToDTO(row))
+}
+
+func (h *Handler) ReleaseThreadClaim(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	issue, ok := h.loadIssueForUser(w, r, chi.URLParam(r, "id"))
+	if !ok {
+		return
+	}
+	thread, ok := h.loadThreadForIssue(w, r, issue.ID, chi.URLParam(r, "threadID"))
+	if !ok {
+		return
+	}
+	actorAgentID, ok := h.resolveAgentActor(w, r, userID, issue.WorkspaceID)
+	if !ok {
+		return
+	}
+	_ = h.Queries.ReleaseThreadClaim(r.Context(), db.ReleaseThreadClaimParams{
+		ID:             thread.ID,
+		ClaimedByAgent: actorAgentID,
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type processThreadRequest struct {
+	Content string `json:"content"`
+}
+
+func (h *Handler) ProcessReviewThread(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	issue, ok := h.loadIssueForUser(w, r, chi.URLParam(r, "id"))
+	if !ok {
+		return
+	}
+	thread, ok := h.loadThreadForIssue(w, r, issue.ID, chi.URLParam(r, "threadID"))
+	if !ok {
+		return
+	}
+
+	var req processThreadRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	req.Content = strings.TrimSpace(req.Content)
+	if req.Content == "" {
+		writeError(w, http.StatusBadRequest, "content is required")
+		return
+	}
+	actorAgentID, ok := h.resolveAgentActor(w, r, userID, issue.WorkspaceID)
+	if !ok {
+		return
+	}
+
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start transaction")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	qtx := h.Queries.WithTx(tx)
+
+	updated, err := qtx.MarkThreadProcessedByResolver(r.Context(), db.MarkThreadProcessedByResolverParams{
+		ID:               thread.ID,
+		ProcessedByAgent: actorAgentID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusConflict, "thread cannot be processed: already processed, claim expired, or held by a different agent")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to mark thread processed")
+		return
+	}
+
+	parentID, err := qtx.GetParentCRReviewCommentForThread(r.Context(), thread.ID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "no cr_review_comment parent for thread")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to load parent comment")
+		return
+	}
+
+	comment, err := qtx.CreateComment(r.Context(), db.CreateCommentParams{
+		IssueID:     issue.ID,
+		WorkspaceID: issue.WorkspaceID,
+		AuthorType:  "agent",
+		AuthorID:    actorAgentID,
+		Content:     req.Content,
+		Type:        "fixer_reply",
+		ParentID:    parentID,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create fixer reply")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit transaction")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"thread":  reviewThreadToDTO(updated),
+		"comment": comment,
+	})
+}
+
+func (h *Handler) GetNextUnpostedThread(w http.ResponseWriter, r *http.Request) {
+	issue, ok := h.loadIssueForUser(w, r, chi.URLParam(r, "id"))
+	if !ok {
+		return
+	}
+	rows, err := h.Queries.ListThreadsWithUnpostedFixerReplies(r.Context(), issue.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list unposted fixer replies")
+		return
+	}
+	if len(rows) == 0 {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	row := rows[0]
+	out := map[string]any{
+		"thread_id":              uuidToString(row.ThreadID),
+		"gh_thread_node_id":      textToPtr(row.GhThreadNodeID),
+		"thread_state":           row.ThreadState,
+		"severity":               row.Severity,
+		"file_path":              row.FilePath,
+		"fixer_reply_comment_id": uuidToString(row.FixerReplyCommentID),
+		"reply_body":             row.ReplyBody,
+	}
+	if row.Line.Valid {
+		out["line"] = row.Line.Int32
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+type markRepliedRequest struct {
+	FixerReplyCommentID string `json:"fixer_reply_comment_id"`
+}
+
+func (h *Handler) MarkThreadReplyPosted(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	issue, ok := h.loadIssueForUser(w, r, chi.URLParam(r, "id"))
+	if !ok {
+		return
+	}
+	thread, ok := h.loadThreadForIssue(w, r, issue.ID, chi.URLParam(r, "threadID"))
+	if !ok {
+		return
+	}
+	if _, ok := h.resolveAgentActor(w, r, userID, issue.WorkspaceID); !ok {
+		return
+	}
+
+	var body markRepliedRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if strings.TrimSpace(body.FixerReplyCommentID) == "" {
+		writeError(w, http.StatusBadRequest, "fixer_reply_comment_id is required")
+		return
+	}
+	postedAt := h.maybeMarkFixerReplyPosted(r.Context(), issue.ID, body.FixerReplyCommentID, thread.ID)
+	if postedAt == "" {
+		writeError(w, http.StatusNotFound, "fixer_reply not found or does not belong to this thread")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"fixer_reply_posted_at": postedAt})
+}
+
+type dismissResponse struct {
+	Dismissed         bool   `json:"dismissed"`
+	DismissedReviewID string `json:"dismissed_review_id,omitempty"`
+}
+
+func (h *Handler) DismissPriorCRChangesRequested(w http.ResponseWriter, r *http.Request) {
+	if h.ReviewActions == nil {
+		writeError(w, http.StatusServiceUnavailable, "review actions disabled")
+		return
+	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	issue, ok := h.loadIssueForUser(w, r, chi.URLParam(r, "id"))
+	if !ok {
+		return
+	}
+	if _, ok := h.resolveAgentActor(w, r, userID, issue.WorkspaceID); !ok {
+		return
+	}
+	binding, ok := h.resolveBindingForIssue(w, r, issue)
+	if !ok {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), githubintegration.DefaultActionTimeout)
+	defer cancel()
+	res, err := h.ReviewActions.DismissPriorCRChangesRequested(ctx, binding, issue)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, dismissResponse{
+		Dismissed:         res.Dismissed,
+		DismissedReviewID: res.ReviewID,
+	})
 }
 
 type replyRequest struct {
