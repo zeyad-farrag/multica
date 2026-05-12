@@ -155,7 +155,7 @@ type ResolveResult struct {
 //
 // agentID, when non-zero, is stamped onto resolved_by_agent so audit
 // logs can attribute the resolution. Pass the dev agent's UUID
-// (Amelia's) when the call originates from the fixing loop.
+// (Amelia's) when the call originates from the resolving loop.
 func (a *ReviewActions) ResolveReviewThread(ctx context.Context, binding db.WorkspaceRepoBinding, thread db.IssueReviewThread, agentID pgtype.UUID) (*ResolveResult, error) {
 	if !thread.GhThreadNodeID.Valid || thread.GhThreadNodeID.String == "" {
 		return nil, errors.New("thread has no gh_thread_node_id; cannot resolve via GraphQL")
