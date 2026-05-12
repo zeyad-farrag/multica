@@ -59,6 +59,8 @@ services:
       COOKIE_DOMAIN: ${COOKIE_DOMAIN:-}
       APP_ENV: ${APP_ENV:-production}
       MULTICA_APP_URL: ${MULTICA_APP_URL:-http://localhost:3000}
+      TEAM_APP_URL: ${TEAM_APP_URL:-}
+      TEAM_APP_SHARED_SECRET: ${TEAM_APP_SHARED_SECRET:-}
       # GitHub App credentials for the CodeRabbit / PR-driven status integration.
       # Webhook stays disabled if any of these are blank — see router.go.
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
