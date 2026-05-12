@@ -245,13 +245,12 @@ func (h *WebhookHandler) handlePR(ctx context.Context, payload map[string]json.R
 		return res, err
 	}
 
-	// If the merge transitioned coderabbit → staged or in_review → staged
-	// (CR not installed on the repo, race ahead of predicate, etc.), chain a
-	// follow-up staged → done so the final card state matches reality. This
-	// mirrors the user-expected flow: CR clean → staged → human merges → done.
+	// If the merge transitioned coderabbit → staged (CR not installed on
+	// the repo, race ahead of predicate, etc.), chain a follow-up staged →
+	// done so the final card state matches reality. This mirrors the
+	// user-expected flow: CR clean → staged → human merges → done.
 	// Idempotent for normal merges (where the issue was already at staged).
-	if dec.NewStatus == StatusStaged &&
-		(dec.ActivityKind == "pr_merged_from_in_review" || dec.ActivityKind == "pr_merged_from_coderabbit") {
+	if dec.NewStatus == StatusStaged && dec.ActivityKind == "pr_merged_from_coderabbit" {
 		refetched, ferr := h.Queries.GetIssue(ctx, issue.ID)
 		if ferr == nil && refetched.Status == StatusStaged {
 			followupIn := Input{
@@ -1381,8 +1380,8 @@ func readPhaseStateCRRound(ctx context.Context, q *db.Queries, issueID pgtype.UU
 // resolved/unresolved webhook deliveries (see handleReviewThread). Reading
 // locally lets us reflect resolutions made by the dev agent in the fixing
 // loop the moment they're written, without a GraphQL round-trip, and lets
-// the state machine drive in_review → fixing on stale unresolved counts even
-// when CR's review state is COMMENTED rather than CHANGES_REQUESTED.
+// the state machine drive coderabbit → resolving on stale unresolved counts
+// even when CR's review state is COMMENTED rather than CHANGES_REQUESTED.
 func (h *WebhookHandler) predicate(ctx context.Context, binding db.WorkspaceRepoBinding, prNumber int32, issueID pgtype.UUID) (noOpenChanges, noUnresolved bool, unresolvedCount int, err error) {
 	owner, repo, ok := splitRepo(binding.RepoFullName)
 	if !ok {

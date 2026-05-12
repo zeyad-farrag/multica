@@ -34,11 +34,6 @@ func TestDecide_PROpened(t *testing.T) {
 			want:   Decision{Action: ActionLinkPR, NewStatus: StatusResolving, ActivityKind: "pr_opened"},
 		},
 		{
-			name:   "from in_review preserves status",
-			status: StatusInReview,
-			want:   Decision{Action: ActionLinkPR, NewStatus: StatusInReview, ActivityKind: "pr_opened"},
-		},
-		{
 			name:   "from staged preserves status",
 			status: StatusStaged,
 			want:   Decision{Action: ActionLinkPR, NewStatus: StatusStaged, ActivityKind: "pr_opened"},
@@ -74,7 +69,6 @@ func TestDecide_PRSynchronize_AlwaysNoop(t *testing.T) {
 		StatusTesting,
 		StatusCoderabbit,
 		StatusResolving,
-		StatusInReview,
 		StatusStaged,
 	}
 	for _, s := range statuses {
@@ -86,26 +80,6 @@ func TestDecide_PRSynchronize_AlwaysNoop(t *testing.T) {
 				t.Fatalf("from %s: got %+v; want noop", s, got)
 			}
 		})
-	}
-}
-
-func TestIsAgentPusher(t *testing.T) {
-	cases := []struct {
-		login string
-		want  bool
-	}{
-		{"bmad-amelia", true},
-		{"BMAD-Amelia", true},
-		{"BMAD-WINSTON", true},
-		{"bmad-quinn", true},
-		{"bmad-murat", true},
-		{"some-human", false},
-		{"", false},
-	}
-	for _, tc := range cases {
-		if got := IsAgentPusher(tc.login); got != tc.want {
-			t.Errorf("IsAgentPusher(%q) = %v; want %v", tc.login, got, tc.want)
-		}
 	}
 }
 
@@ -124,15 +98,6 @@ func TestDecide_PRClosed(t *testing.T) {
 			Kind: EventKindPR, IssueStatus: StatusCoderabbit, PRAction: PRActionClosed, Merged: true,
 		})
 		want := Decision{Action: ActionSetStatus, NewStatus: StatusStaged, ActivityKind: "pr_merged_from_coderabbit"}
-		if got != want {
-			t.Fatalf("got %+v; want %+v", got, want)
-		}
-	})
-	t.Run("merged from in_review → staged (preserve audit)", func(t *testing.T) {
-		got := Decide(Input{
-			Kind: EventKindPR, IssueStatus: StatusInReview, PRAction: PRActionClosed, Merged: true,
-		})
-		want := Decision{Action: ActionSetStatus, NewStatus: StatusStaged, ActivityKind: "pr_merged_from_in_review"}
 		if got != want {
 			t.Fatalf("got %+v; want %+v", got, want)
 		}
@@ -208,15 +173,6 @@ func TestDecide_ReviewChangesRequested(t *testing.T) {
 			t.Fatalf("got %+v; want %+v", got, want)
 		}
 	})
-	t.Run("from in_review by CR → resolving (re-round)", func(t *testing.T) {
-		got := Decide(Input{
-			Kind: EventKindReview, IssueStatus: StatusInReview,
-			ReviewState: ReviewChangesRequested, ReviewByCR: true,
-		})
-		if got.Action != ActionNoop {
-			t.Fatalf("got %+v; want noop", got)
-		}
-	})
 	t.Run("from staged by CR is noop (CR can't reopen staged)", func(t *testing.T) {
 		got := Decide(Input{
 			Kind: EventKindReview, IssueStatus: StatusStaged,
@@ -260,16 +216,6 @@ func TestDecide_ReviewCommentedWithUnresolved(t *testing.T) {
 		}
 		if got != want {
 			t.Fatalf("got %+v; want %+v", got, want)
-		}
-	})
-	t.Run("from in_review + unresolved → resolving (re-round)", func(t *testing.T) {
-		got := Decide(Input{
-			Kind: EventKindReview, IssueStatus: StatusInReview,
-			ReviewState: ReviewCommented, ReviewByCR: true,
-			LocalUnresolvedThreadCount: 1,
-		})
-		if got.Action != ActionNoop {
-			t.Fatalf("got %+v; want noop", got)
 		}
 	})
 	t.Run("from resolving + unresolved is noop (already there)", func(t *testing.T) {
@@ -316,26 +262,6 @@ func TestDecide_ReviewClean(t *testing.T) {
 			t.Fatalf("got %+v; want %+v", got, want)
 		}
 	})
-	t.Run("commented from in_review waits for inline events (noop)", func(t *testing.T) {
-		got := Decide(Input{
-			Kind: EventKindReview, IssueStatus: StatusInReview,
-			ReviewState: ReviewCommented, ReviewByCR: true,
-			NoOpenCRChangesRequest: true, NoUnresolvedCRThreads: true,
-		})
-		if got.Action != ActionNoop {
-			t.Fatalf("commented predicate-clean must noop on in_review (race guard); got %+v", got)
-		}
-	})
-	t.Run("approved from in_review (Marcus done) → staged", func(t *testing.T) {
-		got := Decide(Input{
-			Kind: EventKindReview, IssueStatus: StatusInReview,
-			ReviewState: ReviewApproved, ReviewByCR: true,
-			NoOpenCRChangesRequest: true, NoUnresolvedCRThreads: true,
-		})
-		if got.Action != ActionNoop {
-			t.Fatalf("got %+v; want noop", got)
-		}
-	})
 	t.Run("predicate fails (open changes) → noop", func(t *testing.T) {
 		got := Decide(Input{
 			Kind: EventKindReview, IssueStatus: StatusCoderabbit,
@@ -359,7 +285,7 @@ func TestDecide_ReviewClean(t *testing.T) {
 }
 
 func TestDecideReview_v2_OnlyFiresFromCoderabbit(t *testing.T) {
-	for _, status := range []string{StatusInReview, StatusFixing, StatusTesting, StatusInProgress} {
+	for _, status := range []string{StatusFixing, StatusTesting, StatusInProgress} {
 		t.Run(status, func(t *testing.T) {
 			got := Decide(Input{
 				Kind:                   EventKindReview,

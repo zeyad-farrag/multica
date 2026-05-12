@@ -1,12 +1,11 @@
 package github
 
-// Review-thread mutation actions used by the dev agent's fixing loop.
+// Review-thread mutation actions used by the dev agent's resolving loop.
 //
-// In step 1 we mirrored CR review threads into our local issue_review_thread
-// table. In step 2 the state machine drives in_review → fixing whenever a CR
-// review lands with at least one unresolved local thread. Step 3 (this file)
-// gives the dev agent a way to actually walk those threads in the fixing
-// loop and resolve them on GitHub:
+// CR review threads are mirrored into our local issue_review_thread table.
+// When a CR review lands with at least one unresolved local thread, the
+// state machine drives coderabbit → resolving. This file gives the dev
+// agent a way to actually walk those threads and resolve them on GitHub:
 //
 //   1. ReplyToReviewThread — appends a reply comment under an existing
 //      review thread via the GraphQL `addPullRequestReviewThreadReply`

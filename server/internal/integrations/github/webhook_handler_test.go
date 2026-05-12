@@ -277,26 +277,6 @@ func TestHandleReviewComment_NoStatusFlip(t *testing.T) {
 	}
 }
 
-func TestHandleReview_FromInReview_NoOp_v2(t *testing.T) {
-	fixture := newWebhookHandlerFixture(StatusInReview)
-	client := &fakePredicateClient{listCommentsErr: errors.New("github unavailable")}
-	fixture.handler.NewClient = func(int64) PRReviewClient { return client }
-
-	res, err := fixture.handler.handleReview(context.Background(), reviewPayloadMap("submitted", "CHANGES_REQUESTED", 77, "coderabbitai[bot]"), fixture.binding)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.label != "v2_silent_mirror_review" {
-		t.Fatalf("label = %q, want v2_silent_mirror_review", res.label)
-	}
-	if fixture.store.updatedStatus != "" {
-		t.Fatalf("status updated to %q; v2 in_review wrapping reviews must noop", fixture.store.updatedStatus)
-	}
-	if client.listCommentsCalls != 0 || client.listReviewsCalls != 0 {
-		t.Fatalf("v2 in_review review should not bulk mirror or predicate; comments=%d reviews=%d", client.listCommentsCalls, client.listReviewsCalls)
-	}
-}
-
 func TestHandleReview_BulkMirrorFails_v2_FailsClosed(t *testing.T) {
 	fixture := newWebhookHandlerFixture(StatusCoderabbit)
 	client := &fakePredicateClient{listCommentsErr: errors.New("github unavailable")}

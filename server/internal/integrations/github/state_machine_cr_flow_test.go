@@ -16,7 +16,7 @@ import "testing"
 // in state_machine_test.go; these are documentation tests scoped to the
 // CR loop so coverage is greppable.
 
-// 2. review_submitted (APPROVED) with zero unresolved → staged (skips in_review).
+// 2. review_submitted (APPROVED) with zero unresolved → staged.
 //
 // Note: a COMMENTED review with predicate-clean noops here — see
 // TestDecide_ReviewClean's race-guard subtests. APPROVED is the explicit
@@ -90,18 +90,6 @@ func TestCRFlow_v2_CommentedClean_RecordsPendingSettle(t *testing.T) {
 	}
 	if got.ActivityKind != "review_commented_clean_pending" || got.ReviewStateRecord != ReviewCommented || got.FindingsCount != 0 {
 		t.Fatalf("unexpected pending approval decision: %+v", got)
-	}
-}
-
-func TestCRFlow_InReviewCRChanges_IsNoop(t *testing.T) {
-	got := Decide(Input{
-		Kind:        EventKindReview,
-		IssueStatus: StatusInReview,
-		ReviewState: ReviewChangesRequested,
-		ReviewByCR:  true,
-	})
-	if got.Action != ActionNoop {
-		t.Fatalf("in_review + CR changes_requested should be silent under v2; got %+v", got)
 	}
 }
 
