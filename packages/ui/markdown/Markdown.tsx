@@ -10,6 +10,7 @@ import { cn } from '@multica/ui/lib/utils'
 import { CodeBlock, InlineCode } from './CodeBlock'
 import { preprocessFileCards } from './file-cards'
 import { preprocessLinks } from './linkify'
+import { preprocessMachineBlocks } from './machine-blocks'
 import { preprocessMentionShortcodes } from './mentions'
 import './markdown.css'
 
@@ -75,6 +76,22 @@ const sanitizeSchema = {
       'dataType',
       'dataHref',
       'dataFilename',
+      // BMAD machine-block card
+      ['className', /^mb-/],
+      'dataKind',
+    ],
+    span: [
+      ...(defaultSchema.attributes?.span ?? []),
+      ['className', /^mb-/],
+    ],
+    pre: [
+      ...(defaultSchema.attributes?.pre ?? []),
+      ['className', /^mb-/],
+    ],
+    a: [
+      ...(defaultSchema.attributes?.a ?? []),
+      'target',
+      'rel',
     ],
     code: [
       ...(defaultSchema.attributes?.code ?? []),
@@ -396,6 +413,7 @@ export function Markdown({
       let result = preprocessMentionShortcodes(children)
       result = preprocessLinks(result)
       result = preprocessFileCards(result, cdnDomain ?? '')
+      result = preprocessMachineBlocks(result)
       return result
     },
     [children, cdnDomain]
